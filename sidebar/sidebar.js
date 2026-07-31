@@ -11,6 +11,7 @@ let pendingMessage = null;
 let pendingQuestion = null;
 let questionWizard = { step: 0, answers: [], useCustom: [], selectedAnswers: [] };
 let questionSubmitting = false;
+let answerSubmitting = false;
 
 // Explicit streaming state — not derived from DOM element
 let streamingConvId = null;
@@ -177,14 +178,15 @@ function updateTaskState() {
 
 function updateButtonState() {
   const inputRequired = Boolean(pendingQuestion);
-  chatInput.disabled = inputRequired;
-  addPageInfo.disabled = inputRequired;
-  addSelection.disabled = inputRequired;
-  addReadable.disabled = inputRequired;
-  if (inputRequired) {
-    sendBtn.textContent = '⏹';
-    sendBtn.disabled = false;
-  } else if (transportActive || taskActive) {
+  const processing = answerSubmitting || transportActive || taskActive;
+  chatInput.disabled = inputRequired || answerSubmitting;
+  addPageInfo.disabled = inputRequired || answerSubmitting;
+  addSelection.disabled = inputRequired || answerSubmitting;
+  addReadable.disabled = inputRequired || answerSubmitting;
+  if (answerSubmitting) {
+    sendBtn.textContent = '…';
+    sendBtn.disabled = true;
+  } else if (inputRequired || processing) {
     sendBtn.textContent = '⏹';
     sendBtn.disabled = false;
   } else {
@@ -292,11 +294,9 @@ function renderActiveConversation() {
       renderMessages(conv.messages);
     }
     agentSelect.value = conv.agentName;
-    agentSelect.disabled = true;
   } else {
     clearStreamState();
     messageList.innerHTML = '<div class="empty-conv">No conversation selected. Click ＋ to start a new one.</div>';
-    agentSelect.disabled = false;
   }
 }
 
@@ -322,9 +322,6 @@ function renderAgents(agents) {
   const conv = activeId ? state.conversations?.[activeId] : null;
   if (conv) {
     agentSelect.value = conv.agentName;
-    agentSelect.disabled = true;
-  } else {
-    agentSelect.disabled = false;
   }
 }
 
@@ -354,35 +351,53 @@ function renderToolUses(toolUses) {
   }).join('');
 }
 
-function renderQuestionBlock(question) {
+function parseQuestionAnswers(answerText, questionCount) {
+  if (!answerText) return [];
+  if (questionCount <= 1) return [answerText.trim()];
+
+  const answers = Array(questionCount).fill('');
+  for (const line of answerText.split(/\r?\n/)) {
+    const match = /^q(\d+)\s*:\s*(.*)$/i.exec(line.trim());
+    if (match && Number(match[1]) < questionCount) answers[Number(match[1])] = match[2];
+  }
+  return answers;
+}
+
+function renderQuestionBlock(question, answerText = null) {
   if (!question) return '';
   const questions = question.questions || [];
-  let html = `<div class="question-block" data-question-message-id="${escAttr(question.messageId || '')}" data-question-count="${questions.length}">`;
+  const answers = parseQuestionAnswers(answerText, Math.max(questions.length, 1));
+  const isAnswered = answers.some(Boolean);
+  let html = `<div class="question-block${isAnswered ? ' answered' : ''}" data-question-message-id="${escAttr(question.messageId || '')}" data-question-count="${questions.length}">`;
   if (question.instruction) html += `<p class="question-instruction">${escHtml(question.instruction)}</p>`;
   questions.forEach((questionItem, index) => {
     html += `<div class="question-item" data-question-index="${index}">`;
     html += `<p class="question-text">${escHtml(questionItem.question || '')}</p>`;
-    if (questionItem.guided_answers?.length) {
-      html += '<div class="guided-answers">';
-      questionItem.guided_answers.forEach(answer => {
-        html += `<button type="button" class="guided-btn" data-answer="${escAttr(answer)}">${escHtml(answer)}</button>`;
-      });
-      html += '</div>';
-    }
-    if (question.allowCustomAnswer !== false) {
-      html += `<textarea class="question-answer" data-question-index="${index}" placeholder="Type your answer..."></textarea>`;
+    if (isAnswered) {
+      html += `<div class="question-answered-text">${escHtml(answers[index] || '')}</div>`;
+    } else {
+      if (questionItem.guided_answers?.length) {
+        html += '<div class="guided-answers">';
+        questionItem.guided_answers.forEach(answer => {
+          html += `<button type="button" class="guided-btn" data-answer="${escAttr(answer)}">${escHtml(answer)}</button>`;
+        });
+        html += '</div>';
+      }
+      if (question.allowCustomAnswer !== false) {
+        html += `<textarea class="question-answer" data-question-index="${index}" placeholder="Type your answer..."></textarea>`;
+      }
     }
     html += '</div>';
   });
-  if (!questions.length && question.allowCustomAnswer !== false) {
+  if (!questions.length && !isAnswered && question.allowCustomAnswer !== false) {
     html += '<textarea class="question-answer" data-question-index="0" placeholder="Type your answer..."></textarea>';
   }
-  html += '<button type="button" class="question-submit">Submit answer</button>';
+  if (!isAnswered) html += '<button type="button" class="question-submit">Submit answer</button>';
   html += '</div>';
   return html;
 }
 
-function renderAssistantMessage(msg) {
+function renderAssistantMessage(msg, answerText = null) {
   const text = msg.parts.map(part => part.text || '').join('');
   let html = '';
   if (msg.segmentType === 'thinking') {
@@ -391,7 +406,7 @@ function renderAssistantMessage(msg) {
     html += `<div class="assistant-text">${renderMarkdown(text)}</div>`;
   }
   if (msg.toolUses?.length) html += renderToolUses(msg.toolUses);
-  if (msg.question) html += '<div class="question-waiting">The agent is waiting for your answer below.</div>';
+  if (msg.question) html += renderQuestionBlock(msg.question, answerText);
   return html;
 }
 
@@ -486,13 +501,22 @@ function submitPendingQuestion() {
   const text = questions.length === 1
     ? questionWizard.answers[0]
     : questionWizard.answers.map((answer, index) => `q${index}: ${answer}`).join('\n');
-  questionSubmitting = true;
-  renderQuestionPrompt();
+  const answeredQuestionMessageId = pendingQuestion.messageId || null;
+
+  // Close immediately on submit, but retain a dedicated processing state until the
+  // server starts the next turn or reports an error.
+  pendingQuestion = null;
+  questionSubmitting = false;
+  answerSubmitting = true;
+  questionPrompt.innerHTML = '';
+  questionPrompt.classList.add('hidden');
+  updateButtonState();
+
   statusBar.textContent = 'Sending answer…';
   statusBar.className = 'status-bar connected';
   port.postMessage({
     type: 'ANSWER_QUESTION',
-    data: { convId, text, answeredQuestionMessageId: pendingQuestion.messageId || null }
+    data: { convId, text, answeredQuestionMessageId }
   });
 }
 
@@ -561,11 +585,22 @@ function renderMessages(messages) {
     messageList.innerHTML = '<div class="empty-conv">Start a conversation by typing below!</div>';
     return;
   }
+  const answersByQuestionId = new Map();
+  messages.forEach(message => {
+    if (message.role === 'user' && message.answeredQuestionMessageId) {
+      answersByQuestionId.set(message.answeredQuestionMessageId, message.parts.map(part => part.text || '').join(''));
+    }
+  });
   messages.forEach(msg => {
+    // A linked answer is rendered directly beneath its corresponding question,
+    // not again as a separate user bubble later in the transcript.
+    if (msg.role === 'user' && msg.answeredQuestionMessageId) return;
+
     const div = document.createElement('div');
     div.className = `message ${msg.role}`;
     if (msg.role === 'assistant') {
-      div.innerHTML = renderAssistantMessage(msg);
+      const answerText = msg.question ? answersByQuestionId.get(msg.question.messageId) : null;
+      div.innerHTML = renderAssistantMessage(msg, answerText);
     } else {
       div.innerHTML = renderMessageParts(msg.parts);
     }
@@ -599,6 +634,7 @@ function renderLiveArtifacts() {
 }
 
 function handleStreamChunk(data, legacyAppend) {
+  answerSubmitting = false;
   const payload = typeof data === 'string' ? { text: data, append: legacyAppend !== false } : (data || {});
   const artifactId = payload.artifactId || 'default';
   const segmentId = payload.segmentId || artifactId;
@@ -638,6 +674,7 @@ function handleStreamEnd(endState) {
 }
 
 function handleStreamError(err) {
+  answerSubmitting = false;
   if (pendingQuestion && questionSubmitting) {
     questionSubmitting = false;
     renderQuestionPrompt();
@@ -656,6 +693,7 @@ function handleStreamError(err) {
 }
 
 function handleInputRequired(question) {
+  answerSubmitting = false;
   transportActive = false;
   if (question) {
     pendingQuestion = question;

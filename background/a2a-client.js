@@ -146,12 +146,18 @@ export class A2AClient {
     const raw = metadata?.tool_uses || [];
     return raw.map(t => {
       const input = t.input ?? t.arguments ?? {};
+      const rawStatus = String(t.status || '').toLowerCase();
+      const status = t.error ? 'error'
+        : t.result !== undefined ? 'success'
+        : ['success', 'succeeded', 'completed', 'complete', 'done'].includes(rawStatus) ? 'success'
+        : ['error', 'failed', 'failure', 'cancelled', 'canceled'].includes(rawStatus) ? 'error'
+        : 'pending';
       return {
         id: t.id || `${t.name || 'tool'}:${JSON.stringify(input)}`,
         name: t.name || 'tool',
         input,
         result: t.result,
-        status: t.status || (t.error ? 'error' : t.result !== undefined ? 'success' : 'pending'),
+        status,
         error: t.error,
         timestamp: t.timestamp
       };

@@ -250,6 +250,18 @@ export async function replaceAssistantMessagesForTask(convId, taskId, replacemen
   await setState(state);
 }
 
+// A task can pause for input and resume several times. Append only the assistant
+// records produced by the current logical turn so earlier questions and responses
+// remain part of the conversation history.
+export async function appendAssistantMessagesForTask(convId, taskId, additions) {
+  const state = await getState();
+  const conv = state.conversations[convId];
+  if (!conv || !additions?.length) return;
+  conv.messages.push(...additions);
+  conv.updatedAt = now();
+  await setState(state);
+}
+
 export async function getMessagesForTask(convId, taskId) {
   const conv = await getConversationById(convId);
   if (!conv) return [];

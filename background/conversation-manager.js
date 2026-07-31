@@ -53,10 +53,24 @@ export class ConversationManager {
     if (this.client.normalizeTaskState(serverTask?.status?.state) !== 'input-required') return null;
     const contextId = conv.a2aContextId; const taskId = conv.currentTaskId;
     const a2aParts = textParts.map(t => ({ text: t }));
+
+    // The input-required status and this answer can arrive almost back-to-back.
+    // Persist the server question first, then append the answer independently;
+    // never write a stale full conversation object that can drop either message.
+    const question = serverTask.status?.message?.parts
+      ? this.client.parseQuestionFromParts(serverTask.status.message.parts, serverTask.status.message.messageId)
+      : null;
+    await this._persistQuestion(convId, taskId, question);
+
     const userMsg = Storage.makeMessage('user', [{ kind: 'text', text: textParts.join(' ') }], { taskId, contextId, answeredQuestionMessageId });
-    conv.messages.push(userMsg); conv.currentTaskState = 'submitted';
-    await Storage.setConversationById(convId, conv);
-    this.streaming = { convId, agentName: conv.agentName, taskId, contextId, phase: 'working', startedAt: Date.now(), userMsgId: userMsg.id, parts: a2aParts };
+    await Storage.appendMessage(convId, userMsg);
+    await Storage.updateTaskSnapshot(convId, { currentTaskState: 'submitted', currentTaskUpdatedAt: Date.now() });
+
+    // The task ID is retained when answering an input-required task, but its next
+    // assistant response is a new logical turn. Keep artifact source text so full
+    // snapshots can be diffed, while starting fresh render/persistence segments.
+    if (this._buffers[convId]) delete this._buffers[convId][taskId];
+    this.streaming = { convId, agentName: conv.agentName, taskId, contextId, phase: 'working', startedAt: Date.now(), userMsgId: userMsg.id, parts: a2aParts, resumed: true };
     await Storage.setActiveTask(convId, { ...this.streaming });
     return { msgId: userMsg.id, contextId, taskId, parts: a2aParts };
   }
@@ -91,6 +105,14 @@ export class ConversationManager {
     if (reportedTaskId && this.streaming && !this.streaming.taskId) {
       this.streaming.taskId = reportedTaskId;
       Storage.setActiveTask(this.streaming.convId, { ...this.streaming });
+      // Persist task identity on the durable conversation as soon as the server
+      // assigns it. This allows GetTask recovery even if activeTasks is later lost.
+      Storage.updateTaskSnapshot(convId, {
+        currentTaskId: reportedTaskId,
+        currentTaskState: 'working',
+        currentTaskContextId: this.streaming.contextId || null,
+        currentTaskUpdatedAt: Date.now()
+      });
     }
     const taskId = reportedTaskId || expectedTaskId;
     if (result.task) this._handleTaskSnapshot(convId, taskId, result.task, onEvent);
@@ -104,8 +126,30 @@ export class ConversationManager {
     if (task.contextId && this.streaming) this.streaming.contextId = task.contextId;
     if (task.artifacts) { for (const a of task.artifacts) this._accumArtifact(convId, taskId, a, false, onEvent); }
     if (task.status) {
-      this._applyStatus(convId, taskId, task.status, onEvent);
+      this._applyStatus(convId, taskId, task.status, onEvent, false);
     }
+  }
+
+  async _persistBufferedAssistantTurn(convId, taskId) {
+    const conv = await Storage.getConversationById(convId);
+    if (!conv) return;
+    const records = Object.values(this._buffers[convId]?.[taskId] || {})
+      .filter(record => !record.segmentId?.startsWith('__state__:'));
+    if (!records.length) return;
+
+    const messages = records.map(record => Storage.makeMessage(
+      'assistant',
+      record.text ? [{ kind: 'text', text: record.text }] : [],
+      {
+        taskId,
+        contextId: conv.a2aContextId,
+        segmentType: record.segmentType,
+        toolUses: record.toolUses,
+        question: record.question
+      }
+    )).filter(message => message.parts.length || message.toolUses?.length || message.question);
+
+    await Storage.appendAssistantMessagesForTask(convId, taskId, messages);
   }
 
   async _persistQuestion(convId, taskId, question) {
@@ -131,20 +175,30 @@ export class ConversationManager {
     });
   }
 
-  _applyStatus(convId, taskId, status, onEvent) {
+  _applyStatus(convId, taskId, status, onEvent, completesPendingTools = true) {
+    // A standalone status notification is a subsequent stream chunk. It proves an
+    // earlier tool call without an explicit completion payload has finished.
+    // Snapshot status is excluded because it accompanies its own artifacts.
+    if (completesPendingTools) this._completePendingTools(convId, taskId, onEvent);
     const state = typeof status === 'string' ? status : status?.state;
     const question = status?.message?.parts
       ? this.client.parseQuestionFromParts(status.message.parts, status.message.messageId)
       : null;
     const s = this.client.normalizeTaskState(state);
     if (s === 'completed' || s === 'failed' || s === 'canceled') {
+      this._completePendingTools(convId, taskId, onEvent);
       if (this.streaming) this.streaming.phase = 'terminal';
       onEvent({ convId, taskId, type: 'stream_end', data: state });
       Storage.setActiveTask(convId, null);
     } else if (s === 'input-required') {
       if (this.streaming) this.streaming.phase = 'input_required';
       if (this.streaming) Storage.setActiveTask(convId, { ...this.streaming });
-      this._persistQuestion(convId, taskId, question).catch(() => {});
+      // A task can pause after emitting assistant text/thinking. Persist that
+      // completed logical turn before the user's answer starts a new one.
+      this._persistBufferedAssistantTurn(convId, taskId)
+        .then(() => this._persistQuestion(convId, taskId, question))
+        .then(() => { if (this._buffers[convId]) delete this._buffers[convId][taskId]; })
+        .catch(() => {});
       onEvent({ convId, taskId, type: 'input_required', data: question });
       Storage.getConversationById(convId).then(conv => {
         if (conv) { conv.currentTaskState = 'input-required'; conv.currentTaskId = taskId; Storage.setConversationById(convId, conv); }
@@ -153,7 +207,40 @@ export class ConversationManager {
   }
 
   _handleArtifactUpdate(convId, taskId, update, onEvent) {
+    // This update is the next stream chunk. Mark earlier unresolved tool calls done
+    // before rendering the newly arriving segment (text, thinking, or another tool).
+    this._completePendingTools(convId, taskId, onEvent);
     this._accumArtifact(convId, taskId, update.artifact, update.append !== false, onEvent);
+  }
+
+  _completePendingTools(convId, taskId, onEvent) {
+    const taskBuffers = this._buffers[convId]?.[taskId];
+    if (!taskBuffers) return;
+
+    for (const record of Object.values(taskBuffers)) {
+      if (record.segmentType !== 'tool' || !record.toolUses?.length) continue;
+      const completedTools = record.toolUses.map(tool =>
+        tool.status === 'pending' ? { ...tool, status: 'success' } : tool
+      );
+      if (completedTools.every((tool, index) => tool === record.toolUses[index])) continue;
+
+      record.toolUses = completedTools;
+      onEvent({
+        convId,
+        taskId,
+        type: 'stream_chunk',
+        data: {
+          text: '',
+          fullText: '',
+          append: false,
+          artifactId: record.artifactId,
+          segmentId: record.segmentId,
+          segmentType: 'tool',
+          toolUses: record.toolUses,
+          question: null
+        }
+      });
+    }
   }
 
   _accumArtifact(convId, taskId, artifact, append, onEvent) {
@@ -194,7 +281,9 @@ export class ConversationManager {
     };
 
     if (text || question) {
-      if (!artifactState.textSegmentId || (artifactState.hasToolSegment && append && delta)) {
+      // Preserve chronology even for non-appended artifact snapshots: thinking emitted
+      // after a tool call belongs to a fresh block, not the earlier thinking block.
+      if (!artifactState.textSegmentId || (artifactState.hasToolSegment && delta)) {
         artifactState.nextTextIndex += 1;
         artifactState.textSegmentId = `${artifactId}:text:${artifactState.nextTextIndex}`;
         artifactState.hasToolSegment = false;
@@ -202,7 +291,9 @@ export class ConversationManager {
       const segmentType = isThinking ? 'thinking' : question ? 'question' : 'text';
       const record = makeRecord(artifactState.textSegmentId, segmentType);
       record.segmentType = segmentType;
-      record.text = append ? record.text + delta : this._artifactAccum[accumId];
+      // `delta` is already relative to the source artifact history. Always append
+      // it to this logical response turn so a resumed task never replays earlier text.
+      record.text += delta;
       record.question = question || record.question;
       onEvent({
         convId,
@@ -257,6 +348,7 @@ export class ConversationManager {
   }
 
   _handleDirectMessage(convId, taskId, message, onEvent) {
+    this._completePendingTools(convId, taskId, onEvent);
     const text = this.client.extractTextFromParts(message.parts);
     const question = this.client.parseQuestionFromParts(message.parts, message.messageId);
     if (!text && !question) return;
@@ -278,7 +370,7 @@ export class ConversationManager {
         question: record.question
       });
     });
-    await Storage.replaceAssistantMessagesForTask(convId, taskId, messages.filter(message => message.parts.length || message.toolUses?.length || message.question));
+    await Storage.appendAssistantMessagesForTask(convId, taskId, messages.filter(message => message.parts.length || message.toolUses?.length || message.question));
     await Storage.updateTaskSnapshot(convId, { currentTaskId: null, currentTaskState: 'idle', currentTaskContextId: null, currentTaskCompletedAt: Date.now() });
     await Storage.clearActiveTask(convId);
     delete this._buffers[convId]?.[taskId];
@@ -286,15 +378,53 @@ export class ConversationManager {
   }
 
   async reconcileTaskSnapshot(convId, onEvent) {
-    const activeTask = await Storage.getActiveTask(convId);
-    if (!activeTask || !activeTask.taskId) return { state: 'none' };
+    const conv = await Storage.getConversationById(convId);
+    if (!conv) return { state: 'none' };
+
+    // activeTasks is transport bookkeeping and can be lost when the background
+    // context restarts. The conversation snapshot is the durable recovery source.
+    const storedActiveTask = await Storage.getActiveTask(convId);
+    const taskId = storedActiveTask?.taskId || conv.currentTaskId;
+    const agentName = storedActiveTask?.agentName || conv.agentName;
+    if (!taskId || !agentName) return { state: 'none' };
+    const activeTask = {
+      ...storedActiveTask,
+      convId,
+      taskId,
+      agentName,
+      contextId: storedActiveTask?.contextId || conv.currentTaskContextId || conv.a2aContextId
+    };
+
     let serverTask;
-    try { serverTask = await this.client.getTask(activeTask.agentName, activeTask.taskId); } catch (err) {
+    try { serverTask = await this.client.getTask(agentName, taskId); } catch (err) {
       if (err.code === -32001) { await Storage.clearActiveTask(convId); return { state: 'not_found' }; }
-      return { state: 'pending', taskId: activeTask.taskId, error: err.message };
+      return { state: 'pending', taskId, error: err.message };
     }
     const snapshot = this.client.materializeTaskSnapshot(serverTask);
     if (!snapshot) return { state: 'not_found' };
+
+    // GetTask returns a current task snapshot, not a complete replacement for the
+    // locally persisted conversation. Replacing all assistant messages here drops
+    // earlier question/answer rounds whenever the task asks a follow-up question.
+    if (snapshot.state === 'input-required') {
+      const question = this.client.parseQuestionFromParts(
+        serverTask.status?.message?.parts,
+        serverTask.status?.message?.messageId
+      );
+      this.streaming = {
+        convId,
+        agentName: activeTask.agentName,
+        taskId: snapshot.taskId,
+        contextId: snapshot.contextId || activeTask.contextId,
+        phase: 'input_required',
+        startedAt: activeTask.startedAt || Date.now()
+      };
+      await this._persistQuestion(convId, snapshot.taskId, question);
+      await Storage.setActiveTask(convId, { ...this.streaming });
+      if (onEvent) onEvent({ convId, taskId: snapshot.taskId, type: 'input_required', data: question });
+      return { state: 'input_required', taskId: snapshot.taskId, question };
+    }
+
     const replacements = snapshot.chunks.map(chunk => Storage.makeMessage('assistant',
       chunk.text ? [{ kind: 'text', text: chunk.text }] : [],
       { taskId: snapshot.taskId, contextId: snapshot.contextId, segmentType: chunk.segmentType, toolUses: chunk.toolUses, question: chunk.question, questionMessageId: chunk.questionMessageId }
@@ -305,12 +435,6 @@ export class ConversationManager {
       await Storage.clearActiveTask(convId);
       if (onEvent) onEvent({ convId, taskId: snapshot.taskId, type: 'stream_end', data: snapshot.state });
       return { state: 'terminal' };
-    }
-    if (snapshot.state === 'input-required') {
-      await Storage.updateTaskSnapshot(convId, { currentTaskId: snapshot.taskId, currentTaskState: 'input-required' });
-      await Storage.setActiveTask(convId, { ...activeTask, taskId: snapshot.taskId, phase: 'input_required' });
-      if (onEvent) onEvent({ convId, taskId: snapshot.taskId, type: 'input_required' });
-      return { state: 'input_required' };
     }
     if (serverTask.artifacts) {
       for (const artifact of serverTask.artifacts) {

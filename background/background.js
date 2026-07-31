@@ -188,6 +188,11 @@ async function handleAnswerQuestion(msg, port) {
     abortLocalTransport();
     const result = await mgr.continueInputRequiredTask(convId, [text], answeredQuestionMessageId);
     if (!result) { port.postMessage({ type: 'stream_error', convId, data: 'Task no longer input-required' }); return; }
+
+    // The question and answer have been persisted before streaming resumes. Push
+    // the updated transcript immediately instead of waiting for a terminal task sync.
+    port.postMessage({ type: 'STATE_SYNC', data: await Storage.getState() });
+
     streamHandle = await mgr.startStream(convId, (event) => { onStreamEvent(convId, event); });
     if (streamHandle) _transportConvId = convId;
   } catch (err) { port.postMessage({ type: 'stream_error', convId: msg.data?.convId, data: err.message }); }
@@ -238,13 +243,21 @@ async function handleSwitchConversation(msg, port) {
   const state = await Storage.getState();
   port.postMessage({ type: 'STATE_SYNC', data: state });
   const task = await Storage.getActiveTask(convId);
-  if (task && task.phase !== 'terminal' && task.taskId) {
+  const conv = await Storage.getConversationById(convId);
+  const hasRecoverableTask = Boolean(
+    (task && task.phase !== 'terminal' && task.taskId) ||
+    (conv?.currentTaskId && conv.currentTaskState !== 'idle')
+  );
+  if (hasRecoverableTask) {
     broadcast({ convId, type: 'transport_status', data: 'checking' });
     const result = await mgr.reconcileTaskSnapshot(convId);
     if (result.state === 'alive') {
       tryResubscribe(convId);
     } else if (result.state === 'terminal' || result.state === 'input_required') {
       const fresh = await Storage.getState(); broadcast({ type: 'STATE_SYNC', data: fresh });
+      if (result.state === 'input_required') {
+        broadcast({ convId, taskId: result.taskId, type: 'input_required', data: result.question || null });
+      }
     } else if (result.state === 'pending') {
       broadcast({ convId, type: 'transport_status', data: 'reconnecting' }); tryResubscribe(convId);
     } else { broadcast({ convId, type: 'transport_status', data: 'failed' }); }
@@ -311,12 +324,20 @@ browser.runtime.onConnect.addListener((port) => {
       const activeId = state.activeConversationId;
       if (activeId) {
         const task = await Storage.getActiveTask(activeId);
-        if (task && task.phase !== 'terminal' && task.taskId) {
+        const conv = state.conversations?.[activeId];
+        const hasRecoverableTask = Boolean(
+          (task && task.phase !== 'terminal' && task.taskId) ||
+          (conv?.currentTaskId && conv.currentTaskState !== 'idle')
+        );
+        if (hasRecoverableTask) {
           broadcast({ convId: activeId, type: 'transport_status', data: 'checking' });
           const result = await mgr.reconcileTaskSnapshot(activeId);
           if (result.state === 'alive') { await tryResubscribe(activeId); }
           else if (result.state === 'terminal' || result.state === 'input_required') {
             const f = await Storage.getState(); broadcast({ type: 'STATE_SYNC', data: f });
+            if (result.state === 'input_required') {
+              broadcast({ convId: activeId, taskId: result.taskId, type: 'input_required', data: result.question || null });
+            }
           } else if (result.state === 'pending') {
             broadcast({ convId: activeId, type: 'transport_status', data: 'reconnecting' }); await tryResubscribe(activeId);
           } else { broadcast({ convId: activeId, type: 'transport_status', data: 'failed' }); }
