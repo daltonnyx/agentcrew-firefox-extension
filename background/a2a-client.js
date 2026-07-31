@@ -195,7 +195,6 @@ export class A2AClient {
         status: state
       });
     }
-    // Also extract from status.message
     if (task.status?.message?.parts) {
       const question = this.parseQuestionFromParts(task.status.message.parts, task.status.message.messageId);
       if (question) {

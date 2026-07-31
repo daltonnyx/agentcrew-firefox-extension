@@ -80,7 +80,6 @@ export class ContextExtractor {
       const dataUrl = results[0]?.result;
       if (!dataUrl) return [];
 
-      // dataUrl is like "data:image/png;base64,iVBORw0..."
       const match = dataUrl.match(/^data:(.+?);base64,(.+)$/);
       if (!match) return [];
 

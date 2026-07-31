@@ -12,6 +12,7 @@ export class ConversationManager {
     this.client = null; this.streaming = null;
     this._artifactAccum = {}; this._buffers = {};
     this._pendingKey = {}; this._subGeneration = 0;
+    this._persistenceOps = {};
   }
 
   async init() {
@@ -55,8 +56,10 @@ export class ConversationManager {
     const a2aParts = textParts.map(t => ({ text: t }));
 
     // The input-required status and this answer can arrive almost back-to-back.
-    // Persist the server question first, then append the answer independently;
-    // never write a stale full conversation object that can drop either message.
+    // Wait for the pause turn's thinking/response/question write before appending
+    // the answer, otherwise concurrent storage read-modify-writes can lose messages.
+    const persistenceKey = accumKey(convId, taskId, 'input-required');
+    await this._persistenceOps[persistenceKey];
     const question = serverTask.status?.message?.parts
       ? this.client.parseQuestionFromParts(serverTask.status.message.parts, serverTask.status.message.messageId)
       : null;
@@ -153,20 +156,21 @@ export class ConversationManager {
   }
 
   async _persistQuestion(convId, taskId, question) {
-    if (!question) return;
-    const existing = await Storage.getMessagesForTask(convId, taskId);
-    const duplicate = existing.some(message =>
-      message.role === 'assistant' &&
-      message.segmentType === 'question' &&
-      message.question?.messageId === question.messageId
-    );
-    if (!duplicate) {
-      await Storage.appendMessage(convId, Storage.makeMessage('assistant', [], {
-        taskId,
-        contextId: this.streaming?.contextId || null,
-        segmentType: 'question',
-        question
-      }));
+    if (question) {
+      const existing = await Storage.getMessagesForTask(convId, taskId);
+      const duplicate = existing.some(message =>
+        message.role === 'assistant' &&
+        message.segmentType === 'question' &&
+        message.question?.messageId === question.messageId
+      );
+      if (!duplicate) {
+        await Storage.appendMessage(convId, Storage.makeMessage('assistant', [], {
+          taskId,
+          contextId: this.streaming?.contextId || null,
+          segmentType: 'question',
+          question
+        }));
+      }
     }
     await Storage.updateTaskSnapshot(convId, {
       currentTaskId: taskId,
@@ -193,16 +197,22 @@ export class ConversationManager {
     } else if (s === 'input-required') {
       if (this.streaming) this.streaming.phase = 'input_required';
       if (this.streaming) Storage.setActiveTask(convId, { ...this.streaming });
-      // A task can pause after emitting assistant text/thinking. Persist that
-      // completed logical turn before the user's answer starts a new one.
-      this._persistBufferedAssistantTurn(convId, taskId)
+      // Serialize the pause turn's thinking/response/question writes. In particular,
+      // do not write a previously-read full conversation after these appends: that
+      // stale object would erase the assistant records that were just persisted.
+      const persistenceKey = accumKey(convId, taskId, 'input-required');
+      const previousPersistence = this._persistenceOps[persistenceKey] || Promise.resolve();
+      const persistence = previousPersistence
+        .then(() => this._persistBufferedAssistantTurn(convId, taskId))
         .then(() => this._persistQuestion(convId, taskId, question))
-        .then(() => { if (this._buffers[convId]) delete this._buffers[convId][taskId]; })
-        .catch(() => {});
+        .then(() => { if (this._buffers[convId]) delete this._buffers[convId][taskId]; });
+      this._persistenceOps[persistenceKey] = persistence;
+      persistence
+        .catch(error => console.error('Failed to persist input-required turn:', error))
+        .finally(() => {
+          if (this._persistenceOps[persistenceKey] === persistence) delete this._persistenceOps[persistenceKey];
+        });
       onEvent({ convId, taskId, type: 'input_required', data: question });
-      Storage.getConversationById(convId).then(conv => {
-        if (conv) { conv.currentTaskState = 'input-required'; conv.currentTaskId = taskId; Storage.setConversationById(convId, conv); }
-      });
     } else { if (this.streaming) this.streaming.phase = 'working'; }
   }
 
@@ -403,9 +413,15 @@ export class ConversationManager {
     const snapshot = this.client.materializeTaskSnapshot(serverTask);
     if (!snapshot) return { state: 'not_found' };
 
+    const snapshotMessages = snapshot.chunks.map(chunk => Storage.makeMessage('assistant',
+      chunk.text ? [{ kind: 'text', text: chunk.text }] : [],
+      { taskId: snapshot.taskId, contextId: snapshot.contextId, segmentType: chunk.segmentType, toolUses: chunk.toolUses, question: chunk.question, questionMessageId: chunk.questionMessageId }
+    )).filter(message => message.parts.length || message.toolUses?.length || message.question);
+
     // GetTask returns a current task snapshot, not a complete replacement for the
-    // locally persisted conversation. Replacing all assistant messages here drops
-    // earlier question/answer rounds whenever the task asks a follow-up question.
+    // locally persisted conversation. Merge its unseen artifacts before handling
+    // status so recovery cannot drop earlier thinking/response/question rounds.
+    await Storage.mergeAssistantMessagesForTask(convId, snapshot.taskId, snapshotMessages);
     if (snapshot.state === 'input-required') {
       const question = this.client.parseQuestionFromParts(
         serverTask.status?.message?.parts,
@@ -425,11 +441,6 @@ export class ConversationManager {
       return { state: 'input_required', taskId: snapshot.taskId, question };
     }
 
-    const replacements = snapshot.chunks.map(chunk => Storage.makeMessage('assistant',
-      chunk.text ? [{ kind: 'text', text: chunk.text }] : [],
-      { taskId: snapshot.taskId, contextId: snapshot.contextId, segmentType: chunk.segmentType, toolUses: chunk.toolUses, question: chunk.question, questionMessageId: chunk.questionMessageId }
-    )).filter(m => m.parts.length || m.toolUses || m.question);
-    await Storage.replaceAssistantMessagesForTask(convId, snapshot.taskId, replacements);
     if (snapshot.terminal) {
       await Storage.updateTaskSnapshot(convId, { currentTaskId: null, currentTaskState: 'idle', currentTaskCompletedAt: Date.now() });
       await Storage.clearActiveTask(convId);

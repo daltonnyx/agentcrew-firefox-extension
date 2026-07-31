@@ -8,10 +8,8 @@
 </head>
 <body>
   <div class="app">
-    <!-- Toggle button for conversation list -->
     <button id="convToggleBtn" class="conv-toggle-btn">☰</button>
 
-    <!-- Conversation list panel (slides in from left) -->
     <div id="convListPanel" class="conv-list-panel hidden">
       <div class="conv-list-header">
         <span class="conv-list-title">Conversations</span>
@@ -20,12 +18,9 @@
       <div id="convList" class="conv-list"></div>
     </div>
 
-    <!-- Overlay when conv list is open -->
     <div id="overlay" class="overlay hidden"></div>
 
-    <!-- Main chat area -->
     <div class="main-panel">
-      <!-- Header -->
       <div class="header">
         <div class="header-row">
           <div class="agent-dropdown">
@@ -40,17 +35,14 @@
         <div id="statusBar" class="status-bar">Disconnected</div>
       </div>
 
-      <!-- Chat area -->
       <div id="chatView" class="chat-view">
         <div id="messageList" class="message-list"></div>
       </div>
 
       <section id="questionPrompt" class="question-prompt hidden" aria-live="polite"></section>
 
-      <!-- Context bar -->
       <div id="contextBar" class="context-bar"></div>
 
-      <!-- Input area -->
       <div class="input-area">
         <div class="context-buttons">
           <button id="addPageInfo" title="Attach page info">📄</button>

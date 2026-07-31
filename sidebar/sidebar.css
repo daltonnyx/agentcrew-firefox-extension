@@ -128,7 +128,6 @@ button:focus-visible, select:focus-visible, textarea:focus-visible, summary:focu
 
 .context-bar { display: flex; flex-wrap: wrap; gap: var(--space-2); padding: 0 var(--space-5) var(--space-2); background: var(--surface); }.context-chip { display: flex; align-items: center; max-width: 100%; gap: var(--space-1); padding: var(--space-1) var(--space-3); border: 1px solid var(--border); border-radius: 999px; background: var(--surface-warm); color: var(--fg-2); font-size: var(--text-xs); overflow: hidden; }.context-chip .remove { color: var(--muted); cursor: pointer; }.context-chip .remove:hover { color: var(--fg); }
 
-/* Context attachments inside user messages */
 .context-attachment {
   display: inline-flex;
   align-items: center;
@@ -156,11 +155,9 @@ button:focus-visible, select:focus-visible, textarea:focus-visible, summary:focu
 
 @media (max-width: 360px) { .chat-view { padding: var(--space-5) var(--space-3); }.header { padding-right: var(--space-3); }.input-area, .question-prompt { padding-right: var(--space-3); padding-left: var(--space-3); }.message.user { max-width: 92%; }.context-buttons { margin-left: 0; }.question-prompt-heading, .question-prompt-actions { padding-right: var(--space-4); padding-left: var(--space-4); }.question-prompt-instruction, .question-prompt-text, .question-prompt-answers { padding-right: var(--space-4); padding-left: var(--space-4); }.question-prompt-input { width: calc(100% - 2 * var(--space-4)); margin-right: var(--space-4); margin-left: var(--space-4); } }
 
-/* Missing classes referenced by sidebar.js */
 .tool-use-error pre { color: #c42b1c; }
 .stream-error { color: #c42b1c; }
 
-/* Table styling */
 .message.assistant table {
   border-collapse: collapse;
   margin: var(--space-4) 0;
@@ -181,7 +178,6 @@ button:focus-visible, select:focus-visible, textarea:focus-visible, summary:focu
   background: var(--surface);
 }
 
-/* Dark theme */
 @media (prefers-color-scheme: dark) {
   :root {
     --bg: #212121;

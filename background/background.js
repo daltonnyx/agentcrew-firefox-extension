@@ -7,7 +7,6 @@ const mgr = new ConversationManager();
 let sidebarPort = null;
 let streamHandle = null;
 
-// Track current transport's conversation for lifecycle management
 let _transportConvId = null;
 let _retryTimer = null;
 let _retryCount = 0;
@@ -318,7 +317,6 @@ async function handleStateSync(port) {
 browser.runtime.onConnect.addListener((port) => {
   if (port.name === 'sidebar-port') {
     sidebarPort = port;
-    // When sidebar connects, resubscribe if active conversation matches an active task
     const doConnect = async () => {
       const state = await Storage.getState();
       const activeId = state.activeConversationId;
@@ -357,7 +355,6 @@ browser.runtime.onConnect.addListener((port) => {
   }
 });
 
-// Toolbar button toggles the sidebar
 browser.action.onClicked.addListener(() => {
   browser.sidebarAction.toggle();
 });
@@ -382,7 +379,6 @@ browser.contextMenus.onClicked.addListener(async (info, tab) => {
     }
 
     if (info.menuItemId === 'agentcrew-selection' && info.selectionText) {
-      // Stage selection as context — user composes their own message
       broadcast({
         convId,
         type: 'CONTEXT_DATA',

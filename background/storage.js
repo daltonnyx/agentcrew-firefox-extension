@@ -74,7 +74,6 @@ export async function setState(partial) {
   return next;
 }
 
-// --- Migration from old formats ---
 let _migrated = false;
 
 async function _migrateIfNeeded(state) {
@@ -134,8 +133,6 @@ async function _migrateIfNeeded(state) {
   }
   _migrated = true;
 }
-
-// --- Conversation CRUD by ID ---
 
 export async function getConversationById(convId) {
   const state = await getState();
@@ -211,8 +208,6 @@ export async function updateConversationMeta(convId, updates) {
   await setState(state);
 }
 
-// --- Task-scoped message helpers ---
-
 export async function appendMessage(convId, message) {
   const state = await getState();
   const conv = state.conversations[convId];
@@ -250,6 +245,43 @@ export async function replaceAssistantMessagesForTask(convId, taskId, replacemen
   await setState(state);
 }
 
+function assistantMessageSignature(message) {
+  const text = (message.parts || []).map(part => part.text || '').join('');
+  const questionId = message.question?.messageId || '';
+  const questionBody = questionId ? '' : JSON.stringify(message.question || null);
+  return JSON.stringify([
+    message.segmentType || '',
+    text,
+    message.toolUses || null,
+    questionId,
+    questionBody
+  ]);
+}
+
+// GetTask snapshots may include artifacts from several input/answer rounds. Merge
+// unseen records rather than replacing task messages, which would erase earlier
+// thinking, assistant responses, questions, and their linked user answers.
+export async function mergeAssistantMessagesForTask(convId, taskId, snapshots) {
+  const state = await getState();
+  const conv = state.conversations[convId];
+  if (!conv || !snapshots?.length) return;
+
+  const existing = new Set(conv.messages
+    .filter(message => message.taskId === taskId && message.role === 'assistant')
+    .map(assistantMessageSignature));
+  const additions = [];
+  for (const snapshot of snapshots) {
+    const signature = assistantMessageSignature(snapshot);
+    if (existing.has(signature)) continue;
+    existing.add(signature);
+    additions.push(snapshot);
+  }
+  if (!additions.length) return;
+  conv.messages.push(...additions);
+  conv.updatedAt = now();
+  await setState(state);
+}
+
 // A task can pause for input and resume several times. Append only the assistant
 // records produced by the current logical turn so earlier questions and responses
 // remain part of the conversation history.
@@ -274,8 +306,6 @@ export async function getLatestQuestionForTask(convId, taskId) {
   return conv.messages.filter(m => m.taskId === taskId && m.segmentType === 'question').pop() || null;
 }
 
-// --- Server config ---
-
 export async function getServerConfig() {
   const state = await getState();
   return state.serverConfig;
@@ -286,8 +316,6 @@ export async function setServerConfig(config) {
   state.serverConfig = { ...state.serverConfig, ...config };
   await setState(state);
 }
-
-// --- Per-conversation active tasks ---
 
 export async function getActiveTask(convId) {
   const state = await getState();

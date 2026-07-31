@@ -63,7 +63,6 @@ function handleMessage(msg) {
       if (pendingMessage && state.activeConversationId) {
         const msgData = pendingMessage;
         pendingMessage = null;
-        // Re-add optimistic user bubble for the new conversation
         const userDiv = document.createElement('div');
         userDiv.className = 'message user';
         userDiv.textContent = msgData.parts.join(' ');
@@ -282,14 +281,12 @@ function renderActiveConversation() {
   const activeId = state.activeConversationId;
   const conv = activeId ? state.conversations?.[activeId] : null;
 
-  // If switching conversations, clear old streaming state
   if (streamingConvId && streamingConvId !== activeId) {
     clearStreamState();
     messageList.innerHTML = '';
   }
 
   if (conv) {
-    // Only render persisted messages if we don't have a streaming element already
     if (!streamingMsgEl) {
       renderMessages(conv.messages);
     }
@@ -609,7 +606,6 @@ function renderMessages(messages) {
   messageList.scrollTop = messageList.scrollHeight;
 }
 
-// Maps ordered stream segment IDs to their live DOM elements.
 let streamArtifactElements = new Map();
 
 function renderLiveArtifacts() {
@@ -811,7 +807,6 @@ async function sendMessage() {
         pendingMessage.contextParts.push(p);
       }
     }
-    // Immediately render user message with context in UI
     const userDiv = document.createElement('div');
     userDiv.className = 'message user';
     userDiv.innerHTML = renderMessageParts(pendingMessage.parts.map(t => ({ kind: 'text', text: t })).concat(
@@ -844,7 +839,6 @@ async function sendMessage() {
     }
   }
 
-  // Immediately render user message with context in UI
   const userDiv = document.createElement('div');
   userDiv.className = 'message user';
   userDiv.innerHTML = renderMessageParts(parts.map(t => ({ kind: 'text', text: t })).concat(
@@ -879,8 +873,6 @@ function toggleConvList() {
   convListPanel.classList.toggle('hidden', !convListOpen);
   overlay.classList.toggle('hidden', !convListOpen);
 }
-
-// ── Event listeners ──
 
 convToggleBtn.addEventListener('click', () => {
   toggleConvList();
