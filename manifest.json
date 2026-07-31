@@ -1,0 +1,48 @@
+{
+  "manifest_version": 3,
+  "name": "AgentCrew Browser Bridge",
+  "version": "1.0.0",
+  "description": "Chat with AgentCrew agents from your browser. Attach page context and stream responses via A2A v1.",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "agentcrew-browser-bridge@agentcrew.ai"
+    }
+  },
+  "permissions": ["storage", "activeTab", "scripting", "contextMenus"],
+  "host_permissions": ["http://localhost/*", "http://127.0.0.1/*"],
+  "optional_host_permissions": ["<all_urls>"],
+  "background": {
+    "scripts": ["background/background.js"],
+    "type": "module"
+  },
+  "action": {
+    "default_icon": {
+      "48": "icons/icon-48.png",
+      "96": "icons/icon-96.png"
+    }
+  },
+  "sidebar_action": {
+    "default_panel": "sidebar/sidebar.html",
+    "default_title": "AgentCrew",
+    "default_icon": {
+      "48": "icons/icon-48.png",
+      "96": "icons/icon-96.png"
+    }
+  },
+  "commands": {
+    "toggle-sidebar": {
+      "suggested_key": {
+        "default": "Alt+Shift+C"
+      },
+      "description": "Open or close the AgentCrew sidebar"
+    }
+  },
+  "options_ui": {
+    "page": "options/options.html",
+    "open_in_tab": true
+  },
+  "icons": {
+    "48": "icons/icon-48.png",
+    "96": "icons/icon-96.png"
+  }
+}

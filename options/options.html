@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AgentCrew Settings</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #1a1a2e;
+      color: #e0e0e0;
+      padding: 40px;
+      max-width: 500px;
+      margin: 0 auto;
+    }
+    h1 { color: #e94560; margin-bottom: 24px; }
+    label { display: block; margin-bottom: 6px; font-size: 14px; color: #888; }
+    input {
+      width: 100%;
+      padding: 10px 12px;
+      border-radius: 8px;
+      border: 1px solid #0f3460;
+      background: #16213e;
+      color: #e0e0e0;
+      font-size: 14px;
+      margin-bottom: 16px;
+    }
+    input:focus { outline: none; border-color: #e94560; }
+    button {
+      padding: 10px 20px;
+      border-radius: 8px;
+      border: none;
+      background: #e94560;
+      color: #fff;
+      font-size: 14px;
+      cursor: pointer;
+      margin-top: 8px;
+    }
+    button:hover { background: #c73550; }
+    #status { margin-top: 16px; font-size: 13px; color: #4caf50; }
+    #error { margin-top: 16px; font-size: 13px; color: #e94560; }
+  </style>
+</head>
+<body>
+  <h1>AgentCrew Settings</h1>
+  <label for="serverUrl">Server URL</label>
+  <input type="text" id="serverUrl" placeholder="http://localhost:41241">
+  <label for="bearerToken">Bearer Token (optional)</label>
+  <input type="password" id="bearerToken" placeholder="Leave empty if no auth">
+  <label for="defaultAgent">Default Agent</label>
+  <input type="text" id="defaultAgent" placeholder="e.g. architect">
+  <button id="saveBtn">Save</button>
+  <button id="testBtn" style="background: #0f3460;">Test Connection</button>
+  <div id="status"></div>
+  <div id="error"></div>
+  <script src="options.js"></script>
+</body>
+</html>

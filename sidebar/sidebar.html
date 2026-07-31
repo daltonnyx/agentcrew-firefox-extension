@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AgentCrew</title>
+  <link rel="stylesheet" href="sidebar.css">
+</head>
+<body>
+  <div class="app">
+    <!-- Toggle button for conversation list -->
+    <button id="convToggleBtn" class="conv-toggle-btn">☰</button>
+
+    <!-- Conversation list panel (slides in from left) -->
+    <div id="convListPanel" class="conv-list-panel hidden">
+      <div class="conv-list-header">
+        <span class="conv-list-title">Conversations</span>
+        <button id="closeConvListBtn" class="close-list-btn">✕</button>
+      </div>
+      <div id="convList" class="conv-list"></div>
+    </div>
+
+    <!-- Overlay when conv list is open -->
+    <div id="overlay" class="overlay hidden"></div>
+
+    <!-- Main chat area -->
+    <div class="main-panel">
+      <!-- Header -->
+      <div class="header">
+        <div class="header-row">
+          <div class="agent-dropdown">
+            <select id="agentSelect"></select>
+            <button id="newChatBtn" title="New conversation">＋</button>
+            <button id="refreshBtn" title="Refresh agents">↻</button>
+          </div>
+          <div class="header-actions">
+            <button id="settingsBtn" title="Settings">⚙</button>
+          </div>
+        </div>
+        <div id="statusBar" class="status-bar">Disconnected</div>
+      </div>
+
+      <!-- Chat area -->
+      <div id="chatView" class="chat-view">
+        <div id="messageList" class="message-list"></div>
+      </div>
+
+      <section id="questionPrompt" class="question-prompt hidden" aria-live="polite"></section>
+
+      <!-- Context bar -->
+      <div id="contextBar" class="context-bar"></div>
+
+      <!-- Input area -->
+      <div class="input-area">
+        <div class="context-buttons">
+          <button id="addPageInfo" title="Attach page info">📄</button>
+          <button id="addSelection" title="Attach selection">✂</button>
+          <button id="addReadable" title="Attach page text">📖</button>
+          <button id="addScreenshot" title="Capture visible page screenshot">📷</button>
+        </div>
+        <div class="input-row">
+          <textarea id="chatInput" placeholder="Type a message..." rows="2"></textarea>
+          <button id="sendBtn" title="Send">▶</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="sidebar.js"></script>
+</body>
+</html>
