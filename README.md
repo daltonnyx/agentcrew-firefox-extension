@@ -8,6 +8,7 @@ A Firefox MV3 extension that connects to an [AgentCrew](https://github.com/dalto
 - **Streaming Chat**: Real-time SSE-based response streaming
 - **Page Context**: Attach selected text, page info, or readable content from any webpage
 - **Image Context**: Send images from web pages via context menu
+- **Screenshot Context**: Attach the visible page or drag a rectangle to capture a specific region
 - **Task Persistence**: Conversations survive popup close/reopen via background resubscription
 - **Context Menus**: Right-click to send selection or images directly to agents
 
@@ -56,6 +57,8 @@ agentcrew a2a-server --api-key your-secret-token
 - Click **📄** to attach page URL and title
 - Click **✂** to attach selected text
 - Click **📖** to attach readable page content
+- Click **📷** to attach the visible page screenshot
+- Click **▣** and drag a rectangle on the page to attach only that region (press **Esc** to cancel)
 - Multiple context items can be attached before sending
 
 ### Via Context Menu

@@ -137,6 +137,10 @@ function handleMessage(msg, port) {
       handleCaptureScreenshot(msg, port);
       break;
 
+    case 'SELECT_SCREENSHOT_REGION':
+      handleSelectScreenshotRegion(msg, port);
+      break;
+
     case 'STATE_SYNC':
       handleStateSync(port);
       break;
@@ -283,6 +287,31 @@ async function handleGetPageContext(msg, port) {
       break;
   }
   port.postMessage({ type: 'PAGE_CONTEXT', data: { type, parts }, requestId: msg.requestId });
+}
+
+async function handleSelectScreenshotRegion(msg, port) {
+  const requestId = msg.requestId;
+  try {
+    const tabId = msg.data?.tabId;
+    if (!tabId) throw new Error('No active tab');
+    const region = await ContextExtractor.selectScreenshotRegion(tabId);
+    if (!region) {
+      port.postMessage({ type: 'SCREENSHOT_REGION_CANCELLED', requestId });
+      return;
+    }
+    const dataUrl = await browser.tabs.captureVisibleTab(undefined, { format: 'png' });
+    port.postMessage({
+      type: 'SCREENSHOT_REGION_CAPTURED',
+      data: { dataUrl, region },
+      requestId
+    });
+  } catch (err) {
+    port.postMessage({
+      type: 'ERROR',
+      data: `Could not capture screenshot region: ${err.message}`,
+      requestId
+    });
+  }
 }
 
 async function handleCaptureScreenshot(msg, port) {

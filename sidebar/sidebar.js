@@ -37,6 +37,7 @@ const addPageInfo = document.getElementById('addPageInfo');
 const addSelection = document.getElementById('addSelection');
 const addReadable = document.getElementById('addReadable');
 const addScreenshot = document.getElementById('addScreenshot');
+const addScreenshotRegion = document.getElementById('addScreenshotRegion');
 
 function connect() {
   port = browser.runtime.connect({ name: 'sidebar-port' });
@@ -101,12 +102,27 @@ function handleMessage(msg) {
     case 'PAGE_CONTEXT':
       handlePageContext(msg.data);
       break;
+    case 'SCREENSHOT_REGION_CAPTURED':
+      cropScreenshotRegion(msg.data).catch(err => {
+        statusBar.textContent = `Could not crop screenshot region: ${err.message}`;
+        statusBar.className = 'status-bar error';
+      }).finally(() => {
+        addScreenshotRegion.disabled = Boolean(taskActive || pendingQuestion);
+      });
+      break;
+    case 'SCREENSHOT_REGION_CANCELLED':
+      statusBar.textContent = 'Screenshot selection cancelled';
+      statusBar.className = 'status-bar';
+      addScreenshotRegion.disabled = Boolean(taskActive || pendingQuestion);
+      break;
     case 'CONTEXT_DATA':
       handleContextData(msg.data);
       break;
     case 'ERROR':
       statusBar.textContent = msg.data;
       statusBar.className = 'status-bar error';
+      addScreenshot.disabled = Boolean(taskActive || pendingQuestion);
+      addScreenshotRegion.disabled = Boolean(taskActive || pendingQuestion);
       break;
   }
 }
@@ -182,6 +198,8 @@ function updateButtonState() {
   addPageInfo.disabled = inputRequired || answerSubmitting;
   addSelection.disabled = inputRequired || answerSubmitting;
   addReadable.disabled = inputRequired || answerSubmitting;
+  addScreenshot.disabled = inputRequired || processing;
+  addScreenshotRegion.disabled = inputRequired || processing;
   if (answerSubmitting) {
     sendBtn.textContent = '…';
     sendBtn.disabled = true;
@@ -770,8 +788,45 @@ function handleContextData(data) {
   renderContextBar();
 }
 
+async function cropScreenshotRegion(data) {
+  if (!data?.dataUrl || !data.region) throw new Error('Missing captured image or selection');
+
+  const image = await new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error('Unable to decode captured screenshot'));
+    img.src = data.dataUrl;
+  });
+
+  const { region } = data;
+  const scaleX = image.naturalWidth / region.viewportWidth;
+  const scaleY = image.naturalHeight / region.viewportHeight;
+  const sourceX = Math.max(0, Math.round(region.x * scaleX));
+  const sourceY = Math.max(0, Math.round(region.y * scaleY));
+  const sourceWidth = Math.min(image.naturalWidth - sourceX, Math.max(1, Math.round(region.width * scaleX)));
+  const sourceHeight = Math.min(image.naturalHeight - sourceY, Math.max(1, Math.round(region.height * scaleY)));
+
+  const canvas = document.createElement('canvas');
+  canvas.width = sourceWidth;
+  canvas.height = sourceHeight;
+  const context = canvas.getContext('2d');
+  if (!context) throw new Error('Canvas is unavailable');
+  context.drawImage(image, sourceX, sourceY, sourceWidth, sourceHeight, 0, 0, sourceWidth, sourceHeight);
+
+  const croppedDataUrl = canvas.toDataURL('image/png');
+  const match = /^data:(image\/png);base64,(.+)$/.exec(croppedDataUrl);
+  if (!match) throw new Error('Unable to encode cropped screenshot');
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  handlePageContext({
+    type: 'screenshot_region',
+    parts: [{ raw: match[2], filename: `screenshot-region-${stamp}.png`, mediaType: match[1] }]
+  });
+  statusBar.textContent = 'Screenshot region attached';
+  statusBar.className = 'status-bar connected';
+}
+
 function handlePageContext(data) {
-  const isImage = data.type === 'screenshot' || data.parts?.some(part => part.mediaType?.startsWith('image/'));
+  const isImage = data.type === 'screenshot' || data.type === 'screenshot_region' || data.parts?.some(part => part.mediaType?.startsWith('image/'));
   const preview = isImage
     ? (data.parts?.[0]?.filename || 'Screenshot')
     : data.parts.map(part => part.text || '').join('').slice(0, 50);
@@ -784,7 +839,7 @@ function renderContextBar() {
   pendingContext.forEach((ctx, i) => {
     const chip = document.createElement('div');
     chip.className = 'context-chip';
-    const icon = ctx.type === 'selection' ? '✂' : ctx.type === 'page_info' ? '📄' : ctx.type === 'screenshot' ? '📷' : ctx.type === 'image' ? '🖼' : '📖';
+    const icon = ctx.type === 'selection' ? '✂' : ctx.type === 'page_info' ? '📄' : ctx.type === 'screenshot' ? '📷' : ctx.type === 'screenshot_region' ? '▣' : ctx.type === 'image' ? '🖼' : '📖';
     chip.innerHTML = `${icon} ${ctx.preview} <span class="remove" data-idx="${i}">×</span>`;
     contextBar.appendChild(chip);
   });
@@ -953,23 +1008,52 @@ addReadable.addEventListener('click', async () => {
   port.postMessage({ type: 'GET_PAGE_CONTEXT', data: { tabId: tab.id, type: 'readable' } });
 });
 
+async function requestScreenshotPermission() {
+  const granted = await browser.permissions.request({ origins: ['<all_urls>'] });
+  if (!granted) {
+    statusBar.textContent = 'Screenshot permission was not granted';
+    statusBar.className = 'status-bar error';
+  }
+  return granted;
+}
+
 addScreenshot.addEventListener('click', async () => {
   if (taskActive || pendingQuestion || !port) return;
 
   addScreenshot.disabled = true;
   try {
-    const granted = await browser.permissions.request({ origins: ['<all_urls>'] });
-    if (!granted) {
-      statusBar.textContent = 'Screenshot permission was not granted';
-      statusBar.className = 'status-bar error';
-      return;
-    }
+    if (!await requestScreenshotPermission()) return;
     port.postMessage({ type: 'CAPTURE_SCREENSHOT' });
   } catch (err) {
     statusBar.textContent = `Could not request screenshot permission: ${err.message}`;
     statusBar.className = 'status-bar error';
   } finally {
     addScreenshot.disabled = Boolean(taskActive || pendingQuestion);
+  }
+});
+
+addScreenshotRegion.addEventListener('click', async () => {
+  if (taskActive || pendingQuestion || !port) return;
+
+  addScreenshotRegion.disabled = true;
+  try {
+    if (!await requestScreenshotPermission()) {
+      addScreenshotRegion.disabled = Boolean(taskActive || pendingQuestion);
+      return;
+    }
+    const tab = await getActiveTab();
+    if (!tab?.id) throw new Error('No active tab');
+    statusBar.textContent = 'Drag on the page to select a screenshot area';
+    statusBar.className = 'status-bar';
+    port.postMessage({
+      type: 'SELECT_SCREENSHOT_REGION',
+      data: { tabId: tab.id },
+      requestId: 'screenshot_region_' + Date.now()
+    });
+  } catch (err) {
+    statusBar.textContent = `Could not start screenshot selection: ${err.message}`;
+    statusBar.className = 'status-bar error';
+    addScreenshotRegion.disabled = Boolean(taskActive || pendingQuestion);
   }
 });
 
