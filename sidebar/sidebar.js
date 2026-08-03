@@ -398,7 +398,10 @@ function renderAssistantMessage(msg, answerText = null) {
   const text = msg.parts.map(part => part.text || '').join('');
   let html = '';
   if (msg.segmentType === 'thinking') {
-    html += `<details class="thinking-block"><summary>Thinking</summary><div class="thinking-content">${renderMarkdown(text)}</div></details>`;
+    html += `<section class="thinking-block" aria-label="Agent process">
+      <div class="thinking-heading"><span class="thinking-marker" aria-hidden="true"></span><span>Agent process</span></div>
+      <div class="thinking-content">${renderMarkdown(text)}</div>
+    </section>`;
   } else if (text) {
     html += `<div class="assistant-text">${renderMarkdown(text)}</div>`;
   }
@@ -594,7 +597,7 @@ function renderMessages(messages) {
     if (msg.role === 'user' && msg.answeredQuestionMessageId) return;
 
     const div = document.createElement('div');
-    div.className = `message ${msg.role}`;
+    div.className = `message ${msg.role}${msg.segmentType ? ` ${msg.segmentType}-message` : ''}`;
     if (msg.role === 'assistant') {
       const answerText = msg.question ? answersByQuestionId.get(msg.question.messageId) : null;
       div.innerHTML = renderAssistantMessage(msg, answerText);
@@ -620,7 +623,7 @@ function renderLiveArtifacts() {
     let el = streamArtifactElements.get(segmentId);
     if (!el) {
       el = document.createElement('div');
-      el.className = `message assistant${record.segmentType === 'tool' ? ' tool-message' : ''}`;
+      el.className = `message assistant${record.segmentType ? ` ${record.segmentType}-message` : ''}`;
       messageList.appendChild(el);
       streamArtifactElements.set(segmentId, el);
     }

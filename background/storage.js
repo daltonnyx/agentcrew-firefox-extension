@@ -47,6 +47,7 @@ export function makeMessage(role, parts, opts = {}) {
   return {
     id: uuid(), role, parts, timestamp: now(),
     taskId: opts.taskId || null, contextId: opts.contextId || null,
+    artifactId: opts.artifactId || null, segmentId: opts.segmentId || null,
     segmentType: opts.segmentType || null, toolUses: opts.toolUses || null,
     question: opts.question || null, answeredQuestionMessageId: opts.answeredQuestionMessageId || null
   };
@@ -250,6 +251,7 @@ function assistantMessageSignature(message) {
   const questionId = message.question?.messageId || '';
   const questionBody = questionId ? '' : JSON.stringify(message.question || null);
   return JSON.stringify([
+    message.segmentId || '',
     message.segmentType || '',
     text,
     message.toolUses || null,

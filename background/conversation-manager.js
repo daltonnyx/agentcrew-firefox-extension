@@ -146,6 +146,8 @@ export class ConversationManager {
       {
         taskId,
         contextId: conv.a2aContextId,
+        artifactId: record.artifactId,
+        segmentId: record.segmentId,
         segmentType: record.segmentType,
         toolUses: record.toolUses,
         question: record.question
@@ -269,11 +271,16 @@ export class ConversationManager {
     if (!this._buffers[convId]) this._buffers[convId] = {};
     if (!this._buffers[convId][taskId]) this._buffers[convId][taskId] = {};
     const taskBuffers = this._buffers[convId][taskId];
+    // Timeline state is shared by every artifact in the task. Tool calls commonly
+    // arrive in a different artifact from thinking, so artifact-local state alone
+    // cannot split the thinking that resumes after a tool call.
+    const timelineStateId = '__state__:timeline';
+    const timelineState = taskBuffers[timelineStateId] || { toolBoundary: 0 };
     const stateId = `__state__:${artifactId}`;
     const artifactState = taskBuffers[stateId] || {
       nextTextIndex: 0,
       textSegmentId: null,
-      hasToolSegment: false,
+      textToolBoundary: -1,
       toolSegments: {}
     };
 
@@ -291,12 +298,13 @@ export class ConversationManager {
     };
 
     if (text || question) {
-      // Preserve chronology even for non-appended artifact snapshots: thinking emitted
-      // after a tool call belongs to a fresh block, not the earlier thinking block.
-      if (!artifactState.textSegmentId || (artifactState.hasToolSegment && delta)) {
+      // Start a fresh text/thinking record after every newly observed tool call,
+      // including tools emitted by a different artifact. This preserves the visible
+      // process order as thinking -> tool -> thinking instead of merging both thoughts.
+      if (!artifactState.textSegmentId || artifactState.textToolBoundary !== timelineState.toolBoundary) {
         artifactState.nextTextIndex += 1;
         artifactState.textSegmentId = `${artifactId}:text:${artifactState.nextTextIndex}`;
-        artifactState.hasToolSegment = false;
+        artifactState.textToolBoundary = timelineState.toolBoundary;
       }
       const segmentType = isThinking ? 'thinking' : question ? 'question' : 'text';
       const record = makeRecord(artifactState.textSegmentId, segmentType);
@@ -328,6 +336,7 @@ export class ConversationManager {
       if (!toolSegmentId) {
         toolSegmentId = `${artifactId}:tool:${Object.keys(artifactState.toolSegments).length + 1}`;
         artifactState.toolSegments[toolKey] = toolSegmentId;
+        timelineState.toolBoundary += 1;
       }
       const record = makeRecord(toolSegmentId, 'tool');
       const toolsById = new Map(record.toolUses.map(tool => [tool.id || `${tool.name}:${JSON.stringify(tool.input || {})}`, tool]));
@@ -336,7 +345,6 @@ export class ConversationManager {
         toolsById.set(id, { ...toolsById.get(id), ...tool });
       }
       record.toolUses = [...toolsById.values()];
-      artifactState.hasToolSegment = true;
       onEvent({
         convId,
         taskId,
@@ -355,6 +363,7 @@ export class ConversationManager {
     }
 
     taskBuffers[stateId] = artifactState;
+    taskBuffers[timelineStateId] = timelineState;
   }
 
   _handleDirectMessage(convId, taskId, message, onEvent) {
@@ -375,6 +384,8 @@ export class ConversationManager {
       return Storage.makeMessage('assistant', parts, {
         taskId,
         contextId: conv.a2aContextId,
+        artifactId: record.artifactId,
+        segmentId: record.segmentId,
         segmentType: record.segmentType,
         toolUses: record.toolUses,
         question: record.question
