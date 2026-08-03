@@ -8,12 +8,12 @@
 </head>
 <body>
   <div class="app">
-    <button id="convToggleBtn" class="conv-toggle-btn">☰</button>
+    <button id="convToggleBtn" class="conv-toggle-btn" title="Open conversations" aria-label="Open conversations"><i data-feather="menu" aria-hidden="true"></i></button>
 
     <div id="convListPanel" class="conv-list-panel hidden">
       <div class="conv-list-header">
         <span class="conv-list-title">Conversations</span>
-        <button id="closeConvListBtn" class="close-list-btn">✕</button>
+        <button id="closeConvListBtn" class="close-list-btn" title="Close conversations" aria-label="Close conversations"><i data-feather="x" aria-hidden="true"></i></button>
       </div>
       <div id="convList" class="conv-list"></div>
     </div>
@@ -25,11 +25,11 @@
         <div class="header-row">
           <div class="agent-dropdown">
             <select id="agentSelect"></select>
-            <button id="newChatBtn" title="New conversation">＋</button>
-            <button id="refreshBtn" title="Refresh agents">↻</button>
+            <button id="newChatBtn" title="New conversation" aria-label="New conversation"><i data-feather="plus" aria-hidden="true"></i></button>
+            <button id="refreshBtn" title="Refresh agents" aria-label="Refresh agents"><i data-feather="refresh-cw" aria-hidden="true"></i></button>
           </div>
           <div class="header-actions">
-            <button id="settingsBtn" title="Settings">⚙</button>
+            <button id="settingsBtn" title="Settings" aria-label="Settings"><i data-feather="settings" aria-hidden="true"></i></button>
           </div>
         </div>
         <div id="statusBar" class="status-bar">Disconnected</div>
@@ -45,20 +45,22 @@
 
       <div class="input-area">
         <div class="context-buttons">
-          <button id="addPageInfo" title="Attach page info">📄</button>
-          <button id="addSelection" title="Attach selection">✂</button>
-          <button id="addReadable" title="Attach page text">📖</button>
-          <button id="addScreenshot" title="Capture visible page screenshot" aria-label="Capture visible page screenshot">📷</button>
-          <button id="addScreenshotRegion" title="Capture part of the page" aria-label="Capture part of the page">▣</button>
+          <button id="addPageInfo" title="Attach page info" aria-label="Attach page info"><i data-feather="file-text" aria-hidden="true"></i></button>
+          <button id="addSelection" title="Attach selection" aria-label="Attach selection"><i data-feather="scissors" aria-hidden="true"></i></button>
+          <button id="addReadable" title="Attach page text" aria-label="Attach page text"><i data-feather="book-open" aria-hidden="true"></i></button>
+          <button id="addScreenshot" title="Capture visible page screenshot" aria-label="Capture visible page screenshot"><i data-feather="camera" aria-hidden="true"></i></button>
+          <button id="addScreenshotRegion" title="Capture part of the page" aria-label="Capture part of the page"><i data-feather="crop" aria-hidden="true"></i></button>
         </div>
         <div class="input-row">
           <textarea id="chatInput" placeholder="Type a message..." rows="2"></textarea>
-          <button id="sendBtn" title="Send">▶</button>
+          <button id="sendBtn" title="Send" aria-label="Send"><i data-feather="send" aria-hidden="true"></i></button>
         </div>
       </div>
     </div>
   </div>
 
+  <!-- Feather Icons 4.29.2, vendored from https://cdn.jsdelivr.net/npm/feather-icons@4.29.2/dist/feather.min.js -->
+  <script src="../lib/feather.min.js"></script>
   <script type="module" src="sidebar.js"></script>
 </body>
 </html>

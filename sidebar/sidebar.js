@@ -39,6 +39,43 @@ const addReadable = document.getElementById('addReadable');
 const addScreenshot = document.getElementById('addScreenshot');
 const addScreenshotRegion = document.getElementById('addScreenshotRegion');
 
+const ICONS = {
+  send: 'send',
+  stop: 'square',
+  loading: 'loader',
+  delete: 'trash-2',
+  pending: 'clock',
+  error: 'x-circle',
+  success: 'check-circle',
+  tool: 'tool',
+  image: 'image',
+  file: 'paperclip',
+  selection: 'scissors',
+  readable_text: 'book-open',
+  page_info: 'file-text',
+  screenshot: 'camera',
+  screenshot_region: 'crop'
+};
+
+function iconHtml(name, className = 'icon') {
+  return `<i data-feather="${name}" class="${className}" aria-hidden="true"></i>`;
+}
+
+function refreshIcons(root = document) {
+  if (globalThis.feather) globalThis.feather.replace({ width: 16, height: 16 }, root);
+}
+
+function setButtonIcon(button, name, label) {
+  button.innerHTML = iconHtml(name);
+  if (label) {
+    button.title = label;
+    button.setAttribute('aria-label', label);
+  }
+  refreshIcons(button);
+}
+
+refreshIcons();
+
 function connect() {
   port = browser.runtime.connect({ name: 'sidebar-port' });
   port.onMessage.addListener(handleMessage);
@@ -70,7 +107,7 @@ function handleMessage(msg) {
         messageList.appendChild(userDiv);
         messageList.scrollTop = messageList.scrollHeight;
         // Do NOT restore pendingContext — already embedded in contextParts
-        sendBtn.textContent = '…';
+        setButtonIcon(sendBtn, ICONS.loading, 'Sending');
         sendBtn.disabled = true;
         port.postMessage({
           type: 'SEND_MESSAGE',
@@ -201,13 +238,13 @@ function updateButtonState() {
   addScreenshot.disabled = inputRequired || processing;
   addScreenshotRegion.disabled = inputRequired || processing;
   if (answerSubmitting) {
-    sendBtn.textContent = '…';
+    setButtonIcon(sendBtn, ICONS.loading, 'Sending');
     sendBtn.disabled = true;
   } else if (inputRequired || processing) {
-    sendBtn.textContent = '⏹';
+    setButtonIcon(sendBtn, ICONS.stop, 'Stop');
     sendBtn.disabled = false;
   } else {
-    sendBtn.textContent = '▶';
+    setButtonIcon(sendBtn, ICONS.send, 'Send');
     sendBtn.disabled = false;
   }
 }
@@ -228,7 +265,7 @@ function renderAll() {
     statusBar.className = 'status-bar connected';
     port.postMessage({ type: 'FETCH_AGENTS', requestId: 'agents_' + Date.now() });
   } else {
-    statusBar.textContent = 'Not configured - click ⚙ to set up';
+    statusBar.textContent = 'Not configured — open Settings to set up';
     statusBar.className = 'status-bar error';
   }
 
@@ -266,8 +303,9 @@ function renderConversationList() {
         <div class="conv-item-title">${escHtml(conv.title || 'Conversation')}</div>
         <div class="conv-item-meta">${escHtml(conv.agentName)}${preview ? ' · ' + escHtml(preview) : ''}${time ? ' · ' + time : ''}</div>
       </div>
-      <button class="conv-item-del" data-conv-id="${conv.id}" title="Delete">🗑</button>
+      <button class="conv-item-del" data-conv-id="${conv.id}" title="Delete" aria-label="Delete conversation">${iconHtml(ICONS.delete)}</button>
     `;
+    refreshIcons(item);
 
     item.addEventListener('click', (e) => {
       if (e.target.closest('.conv-item-del')) return;
@@ -311,7 +349,7 @@ function renderActiveConversation() {
     agentSelect.value = conv.agentName;
   } else {
     clearStreamState();
-    messageList.innerHTML = '<div class="empty-conv">No conversation selected. Click ＋ to start a new one.</div>';
+    messageList.innerHTML = '<div class="empty-conv">No conversation selected. Use New conversation to start one.</div>';
   }
 }
 
@@ -350,12 +388,12 @@ function renderToolUses(toolUses) {
     const isPending = t.status === 'pending';
     const isError = t.status === 'error';
     const isSuccess = t.status === 'success';
-    const icon = isPending ? '⏳' : isError ? '❌' : isSuccess ? '✅' : '🔧';
+    const icon = isPending ? ICONS.pending : isError ? ICONS.error : isSuccess ? ICONS.success : ICONS.tool;
     const inputHtml = t.input ? escHtml(JSON.stringify(t.input, null, 2)) : '';
     const resultHtml = t.result ? escHtml(JSON.stringify(t.result, null, 2)) : '';
     const errorHtml = t.error ? escHtml(t.error) : '';
     return `<details class="tool-use">
-      <summary class="tool-use-summary ${t.status}">${icon} <code>${escHtml(t.name)}</code>${isSuccess ? ' ✓' : isError ? ' ✗' : ''}</summary>
+      <summary class="tool-use-summary ${t.status}">${iconHtml(icon, 'tool-status-icon')} <code>${escHtml(t.name)}</code></summary>
       <div class="tool-use-body">
         ${inputHtml ? `<div class="tool-use-section"><strong>Input:</strong><pre>${inputHtml}</pre></div>` : ''}
         ${resultHtml ? `<div class="tool-use-section"><strong>Result:</strong><pre>${resultHtml}</pre></div>` : ''}
@@ -583,13 +621,13 @@ function renderMessageParts(parts) {
   for (const part of parts || []) {
     if (part.kind === 'file' && part.file) {
       const isImage = part.file.mediaType?.startsWith('image/');
-      const icon = isImage ? '🖼' : '📎';
+      const icon = isImage ? ICONS.image : ICONS.file;
       const label = part.file.filename || (isImage ? 'Image' : 'File');
-      html += `<span class="context-attachment${isImage ? ' context-image' : ''}"><span class="context-icon">${icon}</span>${escHtml(label)}</span>`;
+      html += `<span class="context-attachment${isImage ? ' context-image' : ''}"><span class="context-icon">${iconHtml(icon)}</span>${escHtml(label)}</span>`;
     } else if (part.kind === 'context') {
-      const icon = part.contextType === 'selection' ? '✂' : part.contextType === 'readable_text' ? '📖' : '📄';
+      const icon = ICONS[part.contextType] || ICONS.page_info;
       const label = part.preview || part.text || 'Attached context';
-      html += `<span class="context-attachment context-chip-message"><span class="context-icon">${icon}</span>${escHtml(label)}</span>`;
+      html += `<span class="context-attachment context-chip-message"><span class="context-icon">${iconHtml(icon)}</span>${escHtml(label)}</span>`;
     } else if (part.kind === 'text' && part.text) {
       html += `<span class="msg-text">${escHtml(part.text)}</span>`;
     }
@@ -624,6 +662,7 @@ function renderMessages(messages) {
     }
     messageList.appendChild(div);
   });
+  refreshIcons(messageList);
   messageList.scrollTop = messageList.scrollHeight;
 }
 
@@ -647,6 +686,7 @@ function renderLiveArtifacts() {
     }
     el.innerHTML = html;
   }
+  refreshIcons(messageList);
   messageList.scrollTop = messageList.scrollHeight;
 }
 
@@ -839,10 +879,11 @@ function renderContextBar() {
   pendingContext.forEach((ctx, i) => {
     const chip = document.createElement('div');
     chip.className = 'context-chip';
-    const icon = ctx.type === 'selection' ? '✂' : ctx.type === 'page_info' ? '📄' : ctx.type === 'screenshot' ? '📷' : ctx.type === 'screenshot_region' ? '▣' : ctx.type === 'image' ? '🖼' : '📖';
-    chip.innerHTML = `${icon} ${ctx.preview} <span class="remove" data-idx="${i}">×</span>`;
+    const icon = ICONS[ctx.type] || ICONS.readable_text;
+    chip.innerHTML = `${iconHtml(icon)} <span>${escHtml(ctx.preview)}</span> <button type="button" class="remove" data-idx="${i}" aria-label="Remove attachment">${iconHtml('x')}</button>`;
     contextBar.appendChild(chip);
   });
+  refreshIcons(contextBar);
   contextBar.querySelectorAll('.remove').forEach(btn => {
     btn.addEventListener('click', () => {
       pendingContext.splice(parseInt(btn.dataset.idx), 1);
@@ -874,6 +915,7 @@ async function sendMessage() {
       )
     ).filter(Boolean));
     messageList.appendChild(userDiv);
+    refreshIcons(userDiv);
     messageList.scrollTop = messageList.scrollHeight;
 
     chatInput.value = '';
@@ -881,7 +923,7 @@ async function sendMessage() {
     pendingContext = [];
     renderContextBar();
     sendBtn.disabled = true;
-    sendBtn.textContent = '…';
+    setButtonIcon(sendBtn, ICONS.loading, 'Sending');
     port.postMessage({ type: 'NEW_CONVERSATION', data: { agentName: agent } });
     return;
   }
@@ -906,6 +948,7 @@ async function sendMessage() {
     )
   ));
   messageList.appendChild(userDiv);
+  refreshIcons(userDiv);
   messageList.scrollTop = messageList.scrollHeight;
 
   port.postMessage({
@@ -918,7 +961,7 @@ async function sendMessage() {
   pendingContext = [];
   renderContextBar();
   sendBtn.disabled = true;
-  sendBtn.textContent = '…';
+  setButtonIcon(sendBtn, ICONS.loading, 'Sending');
 }
 
 
@@ -969,7 +1012,7 @@ sendBtn.addEventListener('click', () => {
   if (transportActive || taskActive) {
     port.postMessage({ type: 'CANCEL_TASK', data: { convId: state.activeConversationId } });
     sendBtn.disabled = true;
-    sendBtn.textContent = '▶';
+    setButtonIcon(sendBtn, ICONS.send, 'Send');
     transportActive = false;
     taskActive = false;
   } else {
