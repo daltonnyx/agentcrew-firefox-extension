@@ -9,8 +9,6 @@ let streamArtifacts = new Map();
 let convListOpen = false;
 let pendingMessage = null;
 let pendingQuestion = null;
-let questionWizard = { step: 0, answers: [], useCustom: [], selectedAnswers: [] };
-let questionSubmitting = false;
 let answerSubmitting = false;
 
 // Explicit streaming state — not derived from DOM element
@@ -31,7 +29,6 @@ const statusBar = document.getElementById('statusBar');
 const messageList = document.getElementById('messageList');
 const chatInput = document.getElementById('chatInput');
 const sendBtn = document.getElementById('sendBtn');
-const questionPrompt = document.getElementById('questionPrompt');
 const contextBar = document.getElementById('contextBar');
 const addPageInfo = document.getElementById('addPageInfo');
 const addSelection = document.getElementById('addSelection');
@@ -480,141 +477,10 @@ function findPendingQuestion() {
 }
 
 function restorePendingQuestion() {
-  const question = findPendingQuestion();
-  if (!question) {
-    pendingQuestion = null;
-    questionSubmitting = false;
-    questionPrompt.innerHTML = '';
-    questionPrompt.classList.add('hidden');
-    return;
-  }
-  if (!pendingQuestion || pendingQuestion.messageId !== question.messageId) {
-    pendingQuestion = question;
-    const count = Math.max(question.questions?.length || 0, 1);
-    questionWizard = { step: 0, answers: Array(count).fill(''), useCustom: Array(count).fill(false), selectedAnswers: Array.from({ length: count }, () => new Set()) };
-    questionSubmitting = false;
-  }
-  renderQuestionPrompt();
+  pendingQuestion = findPendingQuestion();
 }
 
-function questionItems(question) {
-  const questions = question?.questions || [];
-  return questions.length ? questions : [{ question: 'Please provide the requested information.', guided_answers: [] }];
-}
 
-function renderQuestionPrompt() {
-  if (!pendingQuestion) return;
-  const questions = questionItems(pendingQuestion);
-  const step = Math.min(questionWizard.step, questions.length - 1);
-  questionWizard.step = step;
-  const current = questions[step];
-  const guided = current.guided_answers || [];
-  const selected = questionWizard.selectedAnswers[step] || new Set();
-  const usingCustom = Boolean(questionWizard.useCustom[step]) || !guided.length;
-  const answer = questionWizard.answers[step] || '';
-  const isLast = step === questions.length - 1;
-  const canAdvance = Boolean(answer.trim());
-  const allAnswered = questionWizard.answers.every(value => value.trim());
-
-  let html = '<div class="question-prompt-card">';
-  html += '<div class="question-prompt-heading"><span class="question-prompt-icon">?</span><div><strong>Agent needs your input</strong><span>Answer to continue this task</span></div></div>';
-  if (pendingQuestion.instruction) html += `<p class="question-prompt-instruction">${escHtml(pendingQuestion.instruction)}</p>`;
-  if (questions.length > 1) {
-    html += `<div class="question-progress"><span style="width:${((step + 1) / questions.length) * 100}%"></span></div>`;
-    html += `<div class="question-step-label">Question ${step + 1} of ${questions.length}</div>`;
-  }
-  html += `<p class="question-prompt-text">${escHtml(current.question || '')}</p>`;
-  if (guided.length) {
-    html += '<div class="guided-answers question-prompt-answers">';
-    guided.forEach((option, index) => {
-      const selectedClass = selected.has(option) ? ' selected' : '';
-      html += `<button type="button" class="guided-btn${selectedClass}" data-question-action="guided" data-answer="${escAttr(option)}">${escHtml(option)}</button>`;
-    });
-    html += '</div>';
-    html += `<button type="button" class="question-custom-toggle${usingCustom ? ' selected' : ''}" data-question-action="custom">${usingCustom ? 'Use guided answer' : 'Write a custom answer'}</button>`;
-  }
-  if (usingCustom) {
-    html += `<textarea class="question-prompt-input" data-question-action="input" placeholder="Type your answer…">${escHtml(answer)}</textarea>`;
-  }
-  html += '<div class="question-prompt-actions">';
-  if (step > 0) html += '<button type="button" class="question-nav-btn" data-question-action="back">Back</button>';
-  html += '<span></span>';
-  if (isLast) {
-    html += `<button type="button" class="question-submit" data-question-action="submit" ${(!allAnswered || questionSubmitting) ? 'disabled' : ''}>${questionSubmitting ? 'Sending…' : 'Submit answer'}</button>`;
-  } else {
-    html += `<button type="button" class="question-submit" data-question-action="next" ${(!canAdvance || questionSubmitting) ? 'disabled' : ''}>Next</button>`;
-  }
-  html += '</div></div>';
-  questionPrompt.innerHTML = html;
-  questionPrompt.classList.remove('hidden');
-}
-
-function submitPendingQuestion() {
-  const convId = state.activeConversationId;
-  if (!convId || !pendingQuestion || !port) return;
-  const questions = questionItems(pendingQuestion);
-  if (questionWizard.answers.length !== questions.length || questionWizard.answers.some(answer => !answer.trim())) return;
-  const text = questions.length === 1
-    ? questionWizard.answers[0]
-    : questionWizard.answers.map((answer, index) => `q${index}: ${answer}`).join('\n');
-  const answeredQuestionMessageId = pendingQuestion.messageId || null;
-
-  // Close immediately on submit, but retain a dedicated processing state until the
-  // server starts the next turn or reports an error.
-  pendingQuestion = null;
-  questionSubmitting = false;
-  answerSubmitting = true;
-  questionPrompt.innerHTML = '';
-  questionPrompt.classList.add('hidden');
-  updateButtonState();
-
-  statusBar.textContent = 'Sending answer…';
-  statusBar.className = 'status-bar connected';
-  port.postMessage({
-    type: 'ANSWER_QUESTION',
-    data: { convId, text, answeredQuestionMessageId }
-  });
-}
-
-questionPrompt.addEventListener('click', event => {
-  const button = event.target.closest('[data-question-action]');
-  if (!button || !pendingQuestion || questionSubmitting) return;
-  const questions = questionItems(pendingQuestion);
-  const step = questionWizard.step;
-  const action = button.dataset.questionAction;
-  if (action === 'guided') {
-    const answer = button.dataset.answer || '';
-    const selected = new Set(questionWizard.selectedAnswers[step]);
-    selected.has(answer) ? selected.delete(answer) : selected.add(answer);
-    questionWizard.selectedAnswers[step] = selected;
-    questionWizard.useCustom[step] = false;
-    questionWizard.answers[step] = [...selected].join(', ');
-    renderQuestionPrompt();
-  } else if (action === 'custom') {
-    questionWizard.useCustom[step] = !questionWizard.useCustom[step];
-    if (questionWizard.useCustom[step]) {
-      questionWizard.selectedAnswers[step] = new Set();
-      questionWizard.answers[step] = '';
-    }
-    renderQuestionPrompt();
-  } else if (action === 'back' && step > 0) {
-    questionWizard.step--;
-    renderQuestionPrompt();
-  } else if (action === 'next' && questionWizard.answers[step].trim()) {
-    questionWizard.step = Math.min(step + 1, questions.length - 1);
-    renderQuestionPrompt();
-  } else if (action === 'submit') {
-    submitPendingQuestion();
-  }
-});
-
-questionPrompt.addEventListener('input', event => {
-  const input = event.target.closest('[data-question-action="input"]');
-  if (!input || !pendingQuestion || questionSubmitting) return;
-  questionWizard.answers[questionWizard.step] = input.value;
-  const submit = questionPrompt.querySelector('[data-question-action="submit"], [data-question-action="next"]');
-  if (submit) submit.disabled = !input.value.trim();
-});
 
 function renderMessageParts(parts) {
   let html = '';
@@ -635,7 +501,56 @@ function renderMessageParts(parts) {
   return html;
 }
 
+// The agent's periodic status check can re-emit the same question/artifact while the
+// user is still typing an answer. Every re-render below rebuilds the DOM, which would
+// otherwise discard in-progress answers. Capture draft text (and the focused field)
+// before a rebuild and restore it afterwards.
+function captureDraftAnswers(root) {
+  const drafts = new Map();
+  const focused = root.querySelector('.question-answer:focus');
+  const focusedBlock = focused ? focused.closest('.question-block') : null;
+  root.querySelectorAll('.question-block').forEach(block => {
+    const values = [...block.querySelectorAll('.question-answer')].map(input => input.value);
+    if (values.some(value => value.length)) {
+      drafts.set(block.dataset.questionMessageId || '', values);
+    }
+  });
+  return {
+    drafts,
+    focusedKey: focusedBlock ? (focusedBlock.dataset.questionMessageId || '') : null,
+    focusedIndex: focusedBlock ? [...focusedBlock.querySelectorAll('.question-answer')].indexOf(focused) : null
+  };
+}
+
+function restoreDraftAnswers(root, capture) {
+  if (!capture) return;
+  if (capture.drafts.size) {
+    root.querySelectorAll('.question-block').forEach(block => {
+      const values = capture.drafts.get(block.dataset.questionMessageId || '');
+      if (!values) return;
+      block.querySelectorAll('.question-answer').forEach((input, index) => {
+        if (values[index] !== undefined && input.value !== values[index]) {
+          input.value = values[index];
+        }
+      });
+    });
+  }
+  if (capture.focusedKey !== null && capture.focusedIndex !== null) {
+    const block = [...root.querySelectorAll('.question-block')]
+      .find(b => (b.dataset.questionMessageId || '') === capture.focusedKey);
+    const input = block ? block.querySelectorAll('.question-answer')[capture.focusedIndex] : null;
+    if (input) input.focus();
+  }
+}
+
+function findQuestionBlock(messageId) {
+  if (!messageId) return null;
+  const escaped = String(messageId).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  return messageList.querySelector(`.question-block[data-question-message-id="${escaped}"]`);
+}
+
 function renderMessages(messages) {
+  const draftState = captureDraftAnswers(messageList);
   messageList.innerHTML = '';
   if (!messages?.length) {
     messageList.innerHTML = '<div class="empty-conv">Start a conversation by typing below!</div>';
@@ -663,6 +578,7 @@ function renderMessages(messages) {
     messageList.appendChild(div);
   });
   refreshIcons(messageList);
+  restoreDraftAnswers(messageList, draftState);
   messageList.scrollTop = messageList.scrollHeight;
 }
 
@@ -678,13 +594,30 @@ function renderLiveArtifacts() {
       question: record.question
     });
     let el = streamArtifactElements.get(segmentId);
+
+    // The agent's interval check can re-emit a question artifact after a state
+    // refresh cleared the streaming maps. Reuse the block already shown in the
+    // transcript instead of appending a duplicate question.
+    if (!el && record.question?.messageId) {
+      const existingBlock = findQuestionBlock(record.question.messageId);
+      if (existingBlock) {
+        el = existingBlock.closest('.message');
+        if (el) streamArtifactElements.set(segmentId, el);
+      }
+    }
+
     if (!el) {
       el = document.createElement('div');
       el.className = `message assistant${record.segmentType ? ` ${record.segmentType}-message` : ''}`;
       messageList.appendChild(el);
       streamArtifactElements.set(segmentId, el);
+      el.innerHTML = html;
+    } else if (el.innerHTML !== html) {
+      // Preserve any in-progress answer when a later chunk re-renders the block.
+      const draftState = captureDraftAnswers(el);
+      el.innerHTML = html;
+      restoreDraftAnswers(el, draftState);
     }
-    el.innerHTML = html;
   }
   refreshIcons(messageList);
   messageList.scrollTop = messageList.scrollHeight;
@@ -732,10 +665,6 @@ function handleStreamEnd(endState) {
 
 function handleStreamError(err) {
   answerSubmitting = false;
-  if (pendingQuestion && questionSubmitting) {
-    questionSubmitting = false;
-    renderQuestionPrompt();
-  }
   statusBar.textContent = `Error: ${err}`;
   statusBar.className = 'status-bar error';
   if (streamingMsgEl) {
@@ -753,11 +682,12 @@ function handleInputRequired(question) {
   answerSubmitting = false;
   transportActive = false;
   if (question) {
-    pendingQuestion = question;
-    const count = Math.max(questionItems(question).length, 1);
-    questionWizard = { step: 0, answers: Array(count).fill(''), useCustom: Array(count).fill(false), selectedAnswers: Array.from({ length: count }, () => new Set()) };
-    questionSubmitting = false;
-    renderQuestionPrompt();
+    // The agent's interval check can re-emit the same input-required status
+    // repeatedly while the user is typing. Keep the question already on screen
+    // (and its in-progress answer) instead of replacing it on every tick.
+    if (!pendingQuestion || pendingQuestion.messageId !== question.messageId) {
+      pendingQuestion = question;
+    }
   } else {
     restorePendingQuestion();
   }
