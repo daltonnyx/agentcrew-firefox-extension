@@ -8,7 +8,7 @@
       "id": "agentcrew-browser-bridge@agentcrew.ai"
     }
   },
-  "permissions": ["storage", "activeTab", "scripting", "contextMenus"],
+  "permissions": ["storage", "activeTab", "scripting", "contextMenus", "notifications"],
   "host_permissions": ["http://localhost/*", "http://127.0.0.1/*"],
   "optional_host_permissions": ["<all_urls>"],
   "background": {

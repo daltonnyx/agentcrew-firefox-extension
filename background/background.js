@@ -1,7 +1,9 @@
 import * as Storage from './storage.js';
 import { ConversationManager } from './conversation-manager.js';
+import { A2AClient } from './a2a-client.js';
 import { ContextExtractor } from './context-extractor.js';
 import { createContextMenus } from '../context-menus.js';
+import { parseContentBlock } from '../lib/content-parser.js';
 
 const mgr = new ConversationManager();
 let sidebarPort = null;
@@ -13,6 +15,8 @@ let _retryCount = 0;
 const MAX_RETRIES = 5;
 const RETRY_DELAY_MS = 1000;
 let _retryConvId = null;
+let pendingFill = null;
+let ephemeralFillHandle = null;
 
 async function init() {
   await mgr.init();
@@ -343,6 +347,132 @@ async function handleStateSync(port) {
   port.postMessage({ type: 'STATE_SYNC', data: state });
 }
 
+function notifyUser(title, message, kind = 'info') {
+  // Surface status in the sidebar when it is open (e.g. page context bar).
+  broadcast({ type: 'FILL_STATUS', data: { kind, message } });
+  try {
+    if (browser.notifications) {
+      browser.notifications.create({
+        type: 'basic',
+        iconUrl: browser.runtime.getURL('icons/icon-96.png'),
+        title,
+        message
+      });
+    }
+  } catch { /* notifications unavailable — status already broadcast to sidebar */ }
+}
+
+async function handleGenerateContent(info, tab) {
+  const fillToken = crypto.randomUUID();
+  let target = null;
+  try {
+    const tabId = tab?.id;
+    if (!tabId) { notifyUser('AgentCrew', 'Could not generate content: no active tab', 'error'); return; }
+
+    const frameId = Number.isInteger(info?.frameId) ? info.frameId : 0;
+    target = await ContextExtractor.getEditableTarget(tabId, frameId, info?.targetElementId ?? null);
+    if (!target) {
+      notifyUser('AgentCrew', 'No editable element found on this page. Right-click directly on an input, textarea, or contenteditable field.', 'error');
+      return;
+    }
+
+    ContextExtractor.showFillIndicator(tabId, 'working', 'AgentCrew is enhancing content…', target);
+
+    const state = await Storage.getState();
+    const agentName = state.lastSelectedAgent || state.serverConfig?.defaultAgent;
+    const config = state.serverConfig || {};
+    if (!agentName || !config.baseUrl) {
+      ContextExtractor.showFillIndicator(tabId, 'error', 'No agent configured.', target);
+      notifyUser('AgentCrew', 'No agent configured. Open AgentCrew options to set a server URL and default agent.', 'error');
+      return;
+    }
+
+    const readable = await ContextExtractor.getReadableText(tabId);
+    const pageText = readable.map(r => r.text).join('\n') || '(no readable text extracted)';
+    const dataUrl = await browser.tabs.captureVisibleTab(undefined, { format: 'png' });
+    const match = /^data:(image\/png);base64,(.+)$/.exec(dataUrl || '');
+    if (!match) throw new Error('Unable to encode screenshot');
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const currentIntent = (target.currentValue || '').trim();
+
+    const instruction = [
+      'Enhance content for the targeted form field using the attached page screenshot and page text.',
+      `Target field metadata: ${JSON.stringify(target)}`,
+      currentIntent
+        ? `The field currently contains the user's draft or intent:\n<user_intent>\n${currentIntent}\n</user_intent>`
+        : 'The field is empty. Infer suitable content from the field metadata and page context.',
+      currentIntent
+        ? 'Rewrite and improve that draft while preserving its meaning, language, tone, and relevant details. Do not ignore or replace the user intent with an unrelated response.'
+        : 'Generate concise content appropriate for this field.',
+      target.maxLength ? `The final content must not exceed ${target.maxLength} characters.` : '',
+      'Your entire response must be exactly one fenced code block labeled `content` containing only the final text to insert:',
+      '```content',
+      'Final enhanced content',
+      '```'
+    ].filter(Boolean).join('\n');
+
+    const messageParts = [
+      { text: instruction },
+      { text: `Page content:\n${pageText}` },
+      { raw: match[2], filename: `fill-${stamp}.png`, mediaType: match[1] }
+    ];
+
+    ephemeralFillHandle?.abort();
+    const client = new A2AClient(config);
+    pendingFill = { token: fillToken, tabId, target };
+    ephemeralFillHandle = await client.startEphemeralMessage(agentName, {
+      messageParts,
+      outputModes: ['text/plain']
+    });
+
+    const responseText = await ephemeralFillHandle.result;
+    if (!pendingFill || pendingFill.token !== fillToken) return;
+    const content = parseContentBlock(responseText);
+    if (!content) throw new Error('Agent response had no usable `content` block.');
+
+    const fillResult = await ContextExtractor.fillEditableTarget(tabId, content, target);
+    if (!fillResult?.ok) {
+      // Some model-driven contenteditable editors reject every delayed synthetic
+      // event. Offer a target-anchored button so insertion runs under a fresh,
+      // trusted user activation instead of reporting an unrecoverable failure.
+      if (target.editableType === 'contenteditable' &&
+          fillResult.error === 'value-not-applied-after-framework-update') {
+        const manualAction = await ContextExtractor.showManualInsertAction(tabId, content, target);
+        if (manualAction?.ok) {
+          notifyUser('AgentCrew', 'Generated content is ready. Click Insert generated content above the field.');
+          return;
+        }
+        fillResult.manualActionError = manualAction?.error || 'unknown manual-action error';
+      }
+
+      const diagnostics = [
+        fillResult?.world && `world=${fillResult.world}`,
+        fillResult?.resolvedBy && `target=${fillResult.resolvedBy}`,
+        fillResult?.insertionStrategy && `strategy=${fillResult.insertionStrategy}`,
+        fillResult?.manualActionError && `manual=${fillResult.manualActionError}`,
+        Number.isFinite(fillResult?.expectedLength) && `expected=${fillResult.expectedLength}`,
+        Number.isFinite(fillResult?.actualLength) && `actual=${fillResult.actualLength}`
+      ].filter(Boolean).join(', ');
+      throw new Error(
+        `Could not insert content: ${fillResult?.error || 'unknown error'}` +
+        (diagnostics ? ` (${diagnostics})` : '')
+      );
+    }
+
+    ContextExtractor.showFillIndicator(tabId, 'ok', currentIntent ? 'Content enhanced ✓' : 'Content inserted ✓', target);
+    notifyUser('AgentCrew', currentIntent ? 'Field content enhanced.' : 'Generated content inserted into the field.');
+  } catch (err) {
+    if (err.message === 'Generation canceled.') return;
+    if (tab?.id && target) {
+      ContextExtractor.showFillIndicator(tab.id, 'error', err.message, target);
+    }
+    notifyUser('AgentCrew', `Could not generate content: ${err.message}`, 'error');
+  } finally {
+    if (pendingFill?.token === fillToken) pendingFill = null;
+    if (pendingFill === null) ephemeralFillHandle = null;
+  }
+}
+
 browser.runtime.onConnect.addListener((port) => {
   if (port.name === 'sidebar-port') {
     sidebarPort = port;
@@ -396,6 +526,11 @@ browser.commands.onCommand.addListener((command) => {
 
 browser.contextMenus.onClicked.addListener(async (info, tab) => {
   try {
+    if (info.menuItemId === 'agentcrew-generate') {
+      await handleGenerateContent(info, tab);
+      return;
+    }
+
     const state = await Storage.getState();
     let agentName = state.lastSelectedAgent || state.serverConfig.defaultAgent;
     if (!agentName) return;

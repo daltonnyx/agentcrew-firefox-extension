@@ -152,6 +152,15 @@ function handleMessage(msg) {
     case 'CONTEXT_DATA':
       handleContextData(msg.data);
       break;
+    case 'FILL_STATUS':
+      if (msg.data?.kind === 'error') {
+        statusBar.textContent = msg.data.message;
+        statusBar.className = 'status-bar error';
+      } else {
+        statusBar.textContent = msg.data?.message || '';
+        statusBar.className = 'status-bar connected';
+      }
+      break;
     case 'ERROR':
       statusBar.textContent = msg.data;
       statusBar.className = 'status-bar error';

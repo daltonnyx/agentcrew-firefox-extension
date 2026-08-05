@@ -11,6 +11,12 @@ export function createContextMenus() {
       title: 'Send image to AgentCrew',
       contexts: ['image']
     });
+
+    browser.contextMenus.create({
+      id: 'agentcrew-generate',
+      title: 'Generate content with AgentCrew',
+      contexts: ['editable']
+    });
   });
 }
 
