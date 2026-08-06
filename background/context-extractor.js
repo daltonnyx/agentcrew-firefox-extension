@@ -21,10 +21,10 @@ export class ContextExtractor {
     }
   }
 
-  static async getReadableText(tabId) {
+  static async _readFrameText(tabId, frameId) {
     try {
       const results = await browser.scripting.executeScript({
-        target: { tabId },
+        target: { tabId, frameIds: [frameId] },
         func: () => {
           const article = document.querySelector('article') || document.body;
           const clone = article.cloneNode(true);
@@ -32,11 +32,21 @@ export class ContextExtractor {
           return clone.innerText.slice(0, 15000);
         }
       });
-      const text = results[0]?.result;
-      return text ? [{ text: `Page content:\n${text}` }] : [];
-    } catch {
-      return [];
+      return { ok: true, text: results[0]?.result || '' };
+    } catch (err) {
+      return { ok: false, error: String(err?.message || err) };
     }
+  }
+
+  static async getReadableText(tabId, frameId = 0, label = 'Page content:') {
+    const result = await ContextExtractor._readFrameText(tabId, frameId);
+    return result.ok && result.text ? [{ text: `${label}\n${result.text}` }] : [];
+  }
+
+  static async readFrameTextDiagnostic(tabId, frameId, label) {
+    const result = await ContextExtractor._readFrameText(tabId, frameId);
+    if (!result.ok) return { ok: false, frameId, error: result.error };
+    return { ok: true, parts: result.text ? [{ text: `${label}\n${result.text}` }] : [] };
   }
 
   static async selectScreenshotRegion(tabId) {
@@ -188,7 +198,7 @@ export class ContextExtractor {
     }
   }
 
-  static async getEditableTarget(tabId, frameId = 0, targetElementId = null) {
+  static async getEditableTarget(tabId, frameId = 0, targetElementId = null, strict = false) {
     try {
       const results = await browser.scripting.executeScript({
         target: { tabId, frameIds: [frameId] },
@@ -263,8 +273,13 @@ export class ContextExtractor {
         },
         args: [targetElementId, frameId]
       });
-      return results[0]?.result || null;
-    } catch {
+      const result = results[0]?.result;
+      if (result) return result;
+      return strict ? { ok: false, error: 'no-editable-target-found', frameId } : null;
+    } catch (err) {
+      if (strict) {
+        return { ok: false, error: 'frame-injection-failed', frameId, message: String(err?.message || err) };
+      }
       return null;
     }
   }

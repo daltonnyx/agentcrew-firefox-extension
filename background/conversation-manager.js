@@ -210,6 +210,9 @@ export class ConversationManager {
         .then(() => { if (this._buffers[convId]) delete this._buffers[convId][taskId]; });
       this._persistenceOps[persistenceKey] = persistence;
       persistence
+        .then(() => {
+          onEvent({ convId, taskId, type: 'input_required_persisted', data: question });
+        })
         .catch(error => console.error('Failed to persist input-required turn:', error))
         .finally(() => {
           if (this._persistenceOps[persistenceKey] === persistence) delete this._persistenceOps[persistenceKey];

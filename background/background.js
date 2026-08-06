@@ -88,6 +88,10 @@ async function onStreamEvent(convId, event) {
     const taskId = event.taskId;
     await mgr.finalizeTask(convId, taskId, event.data);
     _transportConvId = null; resetRetryState();
+  } else if (event.type === 'input_required_persisted') {
+    const fresh = await Storage.getState();
+    broadcast({ type: 'STATE_SYNC', data: fresh });
+    return;
   } else if (event.type === 'transport_closed') {
     _transportConvId = null;
     const task = await Storage.getActiveTask(convId);
@@ -362,6 +366,23 @@ function notifyUser(title, message, kind = 'info') {
   } catch { /* notifications unavailable — status already broadcast to sidebar */ }
 }
 
+function buildFrameAccessMessage(info, detail, frameId) {
+  const isFrame = frameId !== 0;
+  const frameUrl = info?.frameUrl || info?.pageUrl || '';
+  let origin = '';
+  try {
+    origin = frameUrl ? new URL(frameUrl).origin : '';
+  } catch {
+    origin = frameUrl;
+  }
+  const target = isFrame ? 'embedded frame' : 'page';
+  const base = origin
+    ? `Cannot access the ${target} (origin: ${origin}).`
+    : `Cannot access the ${target}.`;
+  const cause = detail?.message ? ` ${detail.message}` : '';
+  return `${base} Grant AgentCrew access to this origin and try again.${cause}`;
+}
+
 async function handleGenerateContent(info, tab) {
   const fillToken = crypto.randomUUID();
   let target = null;
@@ -370,7 +391,14 @@ async function handleGenerateContent(info, tab) {
     if (!tabId) { notifyUser('AgentCrew', 'Could not generate content: no active tab', 'error'); return; }
 
     const frameId = Number.isInteger(info?.frameId) ? info.frameId : 0;
-    target = await ContextExtractor.getEditableTarget(tabId, frameId, info?.targetElementId ?? null);
+    target = await ContextExtractor.getEditableTarget(tabId, frameId, info?.targetElementId ?? null, frameId !== 0);
+    if (target?.ok === false) {
+      if (target.error === 'frame-injection-failed') {
+        throw new Error(buildFrameAccessMessage(info, target, frameId));
+      }
+      notifyUser('AgentCrew', 'No editable element found in the target frame. Right-click directly on an input, textarea, or contenteditable field inside the frame.', 'error');
+      return;
+    }
     if (!target) {
       notifyUser('AgentCrew', 'No editable element found on this page. Right-click directly on an input, textarea, or contenteditable field.', 'error');
       return;
@@ -387,8 +415,23 @@ async function handleGenerateContent(info, tab) {
       return;
     }
 
-    const readable = await ContextExtractor.getReadableText(tabId);
-    const pageText = readable.map(r => r.text).join('\n') || '(no readable text extracted)';
+    const readableParts = [];
+    const frameResult = await ContextExtractor.readFrameTextDiagnostic(
+      tabId, frameId, frameId === 0 ? 'Page content:' : 'Target frame content:'
+    );
+    if (frameResult.ok) {
+      readableParts.push(...frameResult.parts);
+      if (frameId !== 0 && frameResult.parts.length === 0) {
+        readableParts.push({ text: 'Target frame content: (no readable text found)' });
+      }
+    } else {
+      throw new Error(buildFrameAccessMessage(info, frameResult, frameId));
+    }
+    if (frameId !== 0) {
+      const topResult = await ContextExtractor.readFrameTextDiagnostic(tabId, 0, 'Top-level page content:');
+      if (topResult.ok) readableParts.push(...topResult.parts);
+    }
+    const pageText = readableParts.map(r => r.text).join('\n') || '(no readable text extracted)';
     const dataUrl = await browser.tabs.captureVisibleTab(undefined, { format: 'png' });
     const match = /^data:(image\/png);base64,(.+)$/.exec(dataUrl || '');
     if (!match) throw new Error('Unable to encode screenshot');
@@ -413,7 +456,7 @@ async function handleGenerateContent(info, tab) {
 
     const messageParts = [
       { text: instruction },
-      { text: `Page content:\n${pageText}` },
+      { text: pageText },
       { raw: match[2], filename: `fill-${stamp}.png`, mediaType: match[1] }
     ];
 
