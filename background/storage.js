@@ -251,7 +251,7 @@ function assistantMessageSignature(message) {
   const questionId = message.question?.messageId || '';
   const questionBody = questionId ? '' : JSON.stringify(message.question || null);
   return JSON.stringify([
-    message.segmentId || '',
+    message.artifactId || '',
     message.segmentType || '',
     text,
     message.toolUses || null,
@@ -291,7 +291,19 @@ export async function appendAssistantMessagesForTask(convId, taskId, additions) 
   const state = await getState();
   const conv = state.conversations[convId];
   if (!conv || !additions?.length) return;
-  conv.messages.push(...additions);
+
+  const existing = new Set(conv.messages
+    .filter(message => message.taskId === taskId && message.role === 'assistant')
+    .map(assistantMessageSignature));
+  const pending = [];
+  for (const addition of additions) {
+    const signature = assistantMessageSignature(addition);
+    if (existing.has(signature)) continue;
+    existing.add(signature);
+    pending.push(addition);
+  }
+  if (!pending.length) return;
+  conv.messages.push(...pending);
   conv.updatedAt = now();
   await setState(state);
 }

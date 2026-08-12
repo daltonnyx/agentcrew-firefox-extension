@@ -727,7 +727,14 @@ export class ContextExtractor {
               }
             }
           }
-          if (!target || !target.isConnected) return;
+          if (!target || !target.isConnected) {
+            const staleHost = document.getElementById(overlayId);
+            if (staleHost) {
+              if (staleHost.__agentcrewCleanup) staleHost.__agentcrewCleanup();
+              staleHost.remove();
+            }
+            return;
+          }
 
           let host = document.getElementById(overlayId);
           if (!host) {
@@ -743,30 +750,66 @@ export class ContextExtractor {
                   background: #171717; color: #fff;
                   font: 600 12px/1.35 system-ui, sans-serif;
                   box-shadow: 0 5px 18px rgba(0,0,0,.32);
-                  max-width: min(360px, 86vw); white-space: nowrap;
+                  max-width: min(480px, 90vw); white-space: nowrap;
                 }
                 .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; }
                 .dot.working { background: #60a5fa; animation: pulse 1.1s ease-in-out infinite; }
                 .dot.ok { background: #34d399; }
                 .dot.error { background: #f87171; }
-                .label { overflow: hidden; text-overflow: ellipsis; }
+                .label { white-space: normal; max-height: 2.6em; overflow: hidden; }
                 @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
               </style>
               <div class="pill"><div class="dot working"></div><div class="label"></div></div>`;
             document.documentElement.appendChild(host);
           }
 
-          const rect = target.getBoundingClientRect();
-          const centerX = Math.min(window.innerWidth - 12, Math.max(12, rect.left + rect.width / 2));
-          const showAbove = rect.top >= 52;
-          host.style.cssText = [
-            'position:fixed',
-            `left:${centerX}px`,
-            `top:${showAbove ? Math.max(8, rect.top - 8) : Math.min(window.innerHeight - 8, rect.bottom + 8)}px`,
-            `transform:${showAbove ? 'translate(-50%,-100%)' : 'translate(-50%,0)'}`,
-            'z-index:2147483647',
-            'pointer-events:none'
-          ].join(';');
+          host.__agentcrewTarget = target;
+
+          if (CSS.supports('anchor-name', '--agentcrew-fill') && CSS.supports('position-anchor', '--agentcrew-fill')) {
+            const rect = target.getBoundingClientRect();
+            const showAbove = rect.top >= 52;
+            target.style.anchorName = '--agentcrew-fill';
+            host.style.position = 'fixed';
+            host.style.positionAnchor = '--agentcrew-fill';
+            host.style.left = 'anchor(center)';
+            host.style.top = showAbove ? 'auto' : 'anchor(bottom)';
+            host.style.bottom = showAbove ? 'anchor(top)' : 'auto';
+            host.style.transform = showAbove ? 'translate(-50%, -8px)' : 'translate(-50%, 8px)';
+            host.style.zIndex = '2147483647';
+            host.style.pointerEvents = 'none';
+            if (!host.__agentcrewCleanup) {
+              host.__agentcrewCleanup = () => {
+                const el = host.__agentcrewTarget;
+                if (el && el.style.anchorName === '--agentcrew-fill') el.style.anchorName = '';
+              };
+            }
+          } else {
+            const updatePosition = () => {
+              const el = host.__agentcrewTarget;
+              if (!el || !el.isConnected) return;
+              const rect = el.getBoundingClientRect();
+              const centerX = Math.min(window.innerWidth - 12, Math.max(12, rect.left + rect.width / 2));
+              const showAbove = rect.top >= 52;
+              host.style.cssText = [
+                'position:fixed',
+                `left:${centerX}px`,
+                `top:${showAbove ? Math.max(8, rect.top - 8) : Math.min(window.innerHeight - 8, rect.bottom + 8)}px`,
+                `transform:${showAbove ? 'translate(-50%,-100%)' : 'translate(-50%,0)'}`,
+                'z-index:2147483647',
+                'pointer-events:none'
+              ].join(';');
+            };
+            updatePosition();
+            if (!host.__agentcrewCleanup) {
+              const onViewportChange = () => updatePosition();
+              host.__agentcrewCleanup = () => {
+                window.removeEventListener('scroll', onViewportChange, { capture: true });
+                window.removeEventListener('resize', onViewportChange);
+              };
+              window.addEventListener('scroll', onViewportChange, { capture: true, passive: true });
+              window.addEventListener('resize', onViewportChange);
+            }
+          }
 
           const shadow = host.shadowRoot;
           const dot = shadow.querySelector('.dot');
@@ -775,7 +818,10 @@ export class ContextExtractor {
           label.textContent = msg || '';
           if (host.__agentcrewRemoveTimer) clearTimeout(host.__agentcrewRemoveTimer);
           if (kind === 'ok' || kind === 'error') {
-            host.__agentcrewRemoveTimer = setTimeout(() => host.remove(), 3500);
+            host.__agentcrewRemoveTimer = setTimeout(() => {
+              if (host.__agentcrewCleanup) host.__agentcrewCleanup();
+              host.remove();
+            }, 3500);
           }
         },
         args: [state, message, targetInfo]

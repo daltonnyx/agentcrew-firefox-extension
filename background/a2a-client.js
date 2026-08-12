@@ -105,7 +105,7 @@ export class A2AClient {
     return this._streamRequest(agentName, body, onEvent);
   }
 
-  async startEphemeralMessage(agentName, { messageParts, outputModes }) {
+  async startEphemeralMessage(agentName, { messageParts, outputModes, onChunk }) {
     let activeHandle = null;
     let taskId = null;
     let settled = false;
@@ -116,21 +116,28 @@ export class A2AClient {
     let recoveryPending = false;
     let recoveryTimer = null;
     const RECOVERY_TIMEOUT_MS = 120000;
+    const GENERATION_TIMEOUT_MS = 180000;
+    const NO_PROGRESS_AFTER_FIRST_EVENT_MS = 90000;
     const artifactTexts = new Map();
     const directTexts = [];
     let resolveResult;
     let rejectResult;
     let completionTimer = null;
+    let generationTimer = null;
+    let noProgressTimer = null;
+    let lastEventAt = 0;
+    let streamClosed = false;
 
     const result = new Promise((resolve, reject) => {
       resolveResult = resolve;
       rejectResult = reject;
     });
 
-    const combinedText = () => [
-      ...artifactTexts.values(),
-      ...directTexts
-    ].filter(Boolean).join('\n');
+    const combinedText = () => {
+      const values = [...artifactTexts.values()];
+      const lastArtifact = values.length ? values[values.length - 1] : '';
+      return [lastArtifact, ...directTexts].filter(Boolean).join('\n');
+    };
 
     const applyArtifact = (artifact, append = true) => {
       if (!artifact) return;
@@ -141,6 +148,8 @@ export class A2AClient {
         artifactId,
         append ? (artifactTexts.get(artifactId) || '') + text : text
       );
+      onChunk?.(text, append);
+      markProgress();
     };
 
     const finish = (error) => {
@@ -148,30 +157,50 @@ export class A2AClient {
       settled = true;
       if (completionTimer) clearTimeout(completionTimer);
       if (recoveryTimer) clearTimeout(recoveryTimer);
-      activeHandle?.abort();
-      if (error) rejectResult(error);
-      else {
+      if (generationTimer) clearTimeout(generationTimer);
+      if (noProgressTimer) clearTimeout(noProgressTimer);
+      if (error) {
+        activeHandle?.abort();
+        rejectResult(error);
+      } else {
+        if (activeHandle && !streamClosed) {
+          setTimeout(() => {
+            if (!streamClosed) activeHandle?.abort();
+          }, 3000);
+        }
         const text = combinedText();
         if (!text.trim()) rejectResult(new Error('Generation completed without generated content.'));
         else resolveResult(text);
       }
     };
 
-    const finishCompleted = () => {
+    const finishCompleted = (polls = 0) => {
       if (settled || stopped) return;
       if (completionTimer) clearTimeout(completionTimer);
       // Some A2A servers emit COMPLETED immediately before the final artifact
-      // event. Give that event a short turn to arrive before snapshot recovery.
+      // event is persisted. Poll the task snapshot (bounded to 6 re-polls) so we
+      // never resolve with incomplete text; fall back otherwise.
       completionTimer = setTimeout(async () => {
         if (settled || stopped) return;
-        if (taskId) {
-          try {
-            const task = await this.getTask(agentName, taskId);
-            applyTask(task, false);
-          } catch { /* accumulated stream output may still be complete */ }
+        if (!taskId) {
+          finish();
+          return;
         }
-        finish();
-      }, 100);
+        try {
+          const task = await this.getTask(agentName, taskId);
+          const state = this.normalizeTaskState(task?.status?.state);
+          if (state === 'completed' || state === 'failed' || state === 'canceled') {
+            applyTask(task, false);
+            finish();
+            return;
+          }
+        } catch { /* accumulated stream output may still be complete */ }
+        if (polls >= 6) {
+          finish();
+          return;
+        }
+        completionTimer = setTimeout(() => finishCompleted(polls + 1), 500);
+      }, 500);
     };
 
     const applyStatus = (status) => {
@@ -248,7 +277,17 @@ export class A2AClient {
       if (retryDelay !== null) scheduleRecovery(retryDelay);
     };
 
+    const markProgress = () => {
+      lastEventAt = Date.now();
+      if (noProgressTimer) clearTimeout(noProgressTimer);
+      noProgressTimer = setTimeout(() => {
+        noProgressTimer = null;
+        finish(new Error('No output received for 90s. The agent may be stuck.'));
+      }, NO_PROGRESS_AFTER_FIRST_EVENT_MS);
+    };
+
     const onRawEvent = (event) => {
+      if (event.type === 'transport_closed') streamClosed = true;
       if (settled || stopped) return;
       if (event.type === 'transport_closed' || event.type === 'error') {
         // A cleanly closed SSE connection is a transport event, not a failed
@@ -278,9 +317,22 @@ export class A2AClient {
       } else if (response.message) {
         if (response.message.taskId) taskId = response.message.taskId;
         const text = this.extractTextFromParts(response.message.parts);
-        if (text) directTexts.push(text);
+        if (text) {
+          directTexts.push(text);
+          onChunk?.(text, true);
+          markProgress();
+        }
       }
     };
+
+    generationTimer = setTimeout(() => {
+      stopped = true;
+      if (completionTimer) clearTimeout(completionTimer);
+      if (recoveryTimer) clearTimeout(recoveryTimer);
+      if (noProgressTimer) clearTimeout(noProgressTimer);
+      activeHandle?.abort();
+      finish(new Error('Generation timed out after 180s. The agent did not complete the task.'));
+    }, GENERATION_TIMEOUT_MS);
 
     try {
       activeHandle = await this.sendStreamingMessage(agentName, {
@@ -298,6 +350,8 @@ export class A2AClient {
         stopped = true;
         if (completionTimer) clearTimeout(completionTimer);
         if (recoveryTimer) clearTimeout(recoveryTimer);
+        if (generationTimer) clearTimeout(generationTimer);
+        if (noProgressTimer) clearTimeout(noProgressTimer);
         activeHandle?.abort();
         finish(new Error('Generation canceled.'));
       }
@@ -449,13 +503,25 @@ export class A2AClient {
 
   async _streamRequest(agentName, body, onEvent) {
     const controller = new AbortController();
+    const RESPONSE_TIMEOUT_MS = 30000;
 
-    const res = await fetch(`${this.baseUrl}/${agentName}/`, {
-      method: 'POST',
-      headers: this._headers({ Accept: 'text/event-stream' }),
-      body: serializeA2AJson(body),
-      signal: controller.signal
-    });
+    let res;
+    const timeout = setTimeout(() => controller.abort(), RESPONSE_TIMEOUT_MS);
+    try {
+      res = await fetch(`${this.baseUrl}/${agentName}/`, {
+        method: 'POST',
+        headers: this._headers({ Accept: 'text/event-stream' }),
+        body: serializeA2AJson(body),
+        signal: controller.signal
+      });
+    } catch (error) {
+      if (error?.name === 'AbortError') {
+        throw new Error(`Stream request timed out (${RESPONSE_TIMEOUT_MS}ms): no response from server.`);
+      }
+      throw error;
+    } finally {
+      clearTimeout(timeout);
+    }
 
     if (!res.ok) {
       const text = await res.text();

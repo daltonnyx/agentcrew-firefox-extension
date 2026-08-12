@@ -351,6 +351,7 @@ function renderActiveConversation() {
   if (conv) {
     if (!streamingMsgEl) {
       renderMessages(conv.messages);
+      if (streamArtifacts.size > 0) renderLiveArtifacts();
     }
     agentSelect.value = conv.agentName;
   } else {
@@ -603,6 +604,10 @@ function renderLiveArtifacts() {
       question: record.question
     });
     let el = streamArtifactElements.get(segmentId);
+    if (el && !el.isConnected) {
+      streamArtifactElements.delete(segmentId);
+      el = null;
+    }
 
     // The agent's interval check can re-emit a question artifact after a state
     // refresh cleared the streaming maps. Reuse the block already shown in the

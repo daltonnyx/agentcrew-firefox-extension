@@ -11,7 +11,7 @@ export class ConversationManager {
   constructor() {
     this.client = null; this.streaming = null;
     this._artifactAccum = {}; this._buffers = {};
-    this._pendingKey = {}; this._subGeneration = 0;
+    this._subGeneration = 0;
     this._persistenceOps = {};
   }
 
@@ -38,9 +38,6 @@ export class ConversationManager {
     if (conv.title === 'New conversation' && a2aParts.length && a2aParts[0].text) conv.title = a2aParts[0].text.slice(0, 40);
     conv.currentTaskId = null; conv.currentTaskState = 'submitted'; conv.currentTaskContextId = conv.a2aContextId;
     await Storage.setConversationById(convId, conv);
-    const pendingKey = `pending:${msgId}`;
-    this._pendingKey[convId] = pendingKey;
-    this._buffers[pendingKey] = [];
     this.streaming = { convId, agentName: conv.agentName, taskId: null, contextId: conv.a2aContextId, phase: 'working', startedAt: Date.now(), userMsgId: msgId, parts: a2aParts };
     await Storage.setActiveTask(convId, { ...this.streaming });
     return { msgId, contextId: conv.a2aContextId, taskId: null, parts: a2aParts };
@@ -104,7 +101,12 @@ export class ConversationManager {
     try { parsed = JSON.parse(event.data); } catch { return; }
     const result = parsed.result;
     if (!result) return;
-    const reportedTaskId = result.task?.id || this.streaming?.taskId;
+    const reportedTaskId =
+      result.task?.id ||
+      result.artifactUpdate?.taskId ||
+      result.statusUpdate?.taskId ||
+      result.message?.taskId ||
+      this.streaming?.taskId;
     if (reportedTaskId && this.streaming && !this.streaming.taskId) {
       this.streaming.taskId = reportedTaskId;
       Storage.setActiveTask(this.streaming.convId, { ...this.streaming });
@@ -381,6 +383,24 @@ export class ConversationManager {
     if (!Storage.isTerminalState(Storage.normalizeTaskState(state))) return;
     const conv = await Storage.getConversationById(convId);
     if (!conv) return;
+
+    // Some A2A servers emit the terminal status update before the final artifact
+    // update. Wait for in-flight input-required persistence, give trailing events
+    // a turn to accumulate into the buffers, then recover any missing tail from
+    // the server so the last assistant message is not truncated.
+    const inFlightPersistence = this._persistenceOps[accumKey(convId, taskId, 'input-required')];
+    if (inFlightPersistence) await inFlightPersistence;
+    await new Promise(resolve => setTimeout(resolve, 100));
+    if (taskId) {
+      try {
+        const serverTask = await this.client.getTask(conv.agentName, taskId);
+        const noopOnEvent = () => {};
+        for (const artifact of serverTask?.artifacts || []) {
+          this._accumArtifact(convId, taskId, artifact, false, noopOnEvent);
+        }
+      } catch { /* best-effort tail recovery; keep buffered content */ }
+    }
+
     const records = Object.values(this._buffers[convId]?.[taskId] || {}).filter(record => !record.segmentId?.startsWith('__state__:'));
     const messages = records.map(record => {
       const parts = record.text ? [{ kind: 'text', text: record.text }] : [];
@@ -429,7 +449,7 @@ export class ConversationManager {
 
     const snapshotMessages = snapshot.chunks.map(chunk => Storage.makeMessage('assistant',
       chunk.text ? [{ kind: 'text', text: chunk.text }] : [],
-      { taskId: snapshot.taskId, contextId: snapshot.contextId, segmentType: chunk.segmentType, toolUses: chunk.toolUses, question: chunk.question, questionMessageId: chunk.questionMessageId }
+      { taskId: snapshot.taskId, contextId: snapshot.contextId, artifactId: chunk.artifactId || null, segmentType: chunk.segmentType, toolUses: chunk.toolUses, question: chunk.question, questionMessageId: chunk.questionMessageId }
     )).filter(message => message.parts.length || message.toolUses?.length || message.question);
 
     // GetTask returns a current task snapshot, not a complete replacement for the
@@ -477,7 +497,7 @@ export class ConversationManager {
   async resubscribe(convId, onEvent) {
     const task = await Storage.getActiveTask(convId);
     if (!task || !task.taskId) return null;
-    const rc = await this.reconcileTaskSnapshot(convId);
+    const rc = await this.reconcileTaskSnapshot(convId, onEvent);
     if (rc.state !== 'alive') return null;
     const gen = ++this._subGeneration;
     return this.client.subscribeToTask(task.agentName, task.taskId, (event) => {

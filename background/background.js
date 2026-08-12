@@ -460,12 +460,27 @@ async function handleGenerateContent(info, tab) {
       { raw: match[2], filename: `fill-${stamp}.png`, mediaType: match[1] }
     ];
 
+    let pillStreamText = '';
+    let lastPillUpdate = 0;
+    const PILL_UPDATE_INTERVAL_MS = 250;
+    const PILL_MAX_CHARS = 320;
+    const onChunk = (text, append) => {
+      if (!pendingFill || pendingFill.token !== fillToken) return;
+      pillStreamText = append ? pillStreamText + text : text;
+      const now = Date.now();
+      if (now - lastPillUpdate < PILL_UPDATE_INTERVAL_MS) return;
+      lastPillUpdate = now;
+      const shown = pillStreamText.slice(-PILL_MAX_CHARS);
+      ContextExtractor.showFillIndicator(tabId, 'working', shown, target);
+    };
+
     ephemeralFillHandle?.abort();
     const client = new A2AClient(config);
     pendingFill = { token: fillToken, tabId, target };
     ephemeralFillHandle = await client.startEphemeralMessage(agentName, {
       messageParts,
-      outputModes: ['text/plain']
+      outputModes: ['text/plain'],
+      onChunk
     });
 
     const responseText = await ephemeralFillHandle.result;
@@ -506,7 +521,7 @@ async function handleGenerateContent(info, tab) {
     notifyUser('AgentCrew', currentIntent ? 'Field content enhanced.' : 'Generated content inserted into the field.');
   } catch (err) {
     if (err.message === 'Generation canceled.') return;
-    if (tab?.id && target) {
+    if (tab?.id) {
       ContextExtractor.showFillIndicator(tab.id, 'error', err.message, target);
     }
     notifyUser('AgentCrew', `Could not generate content: ${err.message}`, 'error');
