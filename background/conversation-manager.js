@@ -13,6 +13,7 @@ export class ConversationManager {
     this._artifactAccum = {}; this._buffers = {};
     this._subGeneration = 0;
     this._persistenceOps = {};
+    this._contextPersist = {};
   }
 
   async init() {
@@ -44,6 +45,9 @@ export class ConversationManager {
   }
 
   async continueInputRequiredTask(convId, textParts, answeredQuestionMessageId) {
+    // Wait for any in-flight canonical context persistence so this send reads
+    // and stamps the durable canonical contextId, never a stale local one.
+    if (this._contextPersist[convId]) await this._contextPersist[convId];
     const conv = await Storage.getConversationById(convId);
     if (!conv || !conv.currentTaskId) return null;
     let serverTask;
@@ -76,6 +80,9 @@ export class ConversationManager {
   }
 
   async sendMessage(convId, textParts, contextParts = []) {
+    // Wait for any in-flight canonical context persistence so this send reads
+    // and stamps the durable canonical contextId, never a stale local one.
+    if (this._contextPersist[convId]) await this._contextPersist[convId];
     const conv = await Storage.getConversationById(convId);
     if (!conv) return null;
     if (conv.currentTaskState === 'input-required') return this.continueInputRequiredTask(convId, textParts, null);
@@ -108,15 +115,25 @@ export class ConversationManager {
       result.message?.taskId ||
       this.streaming?.taskId;
     if (reportedTaskId && this.streaming && !this.streaming.taskId) {
+      // Mirror the server-returned canonical contextId (synchronously) before
+      // any task-identity storage write, so those writes can never carry a
+      // stale locally generated ID even if they land after canonical writes.
+      if (result.task?.contextId) this._persistCanonicalContextId(convId, result.task.contextId, true);
       this.streaming.taskId = reportedTaskId;
-      Storage.setActiveTask(this.streaming.convId, { ...this.streaming });
-      // Persist task identity on the durable conversation as soon as the server
-      // assigns it. This allows GetTask recovery even if activeTasks is later lost.
-      Storage.updateTaskSnapshot(convId, {
-        currentTaskId: reportedTaskId,
-        currentTaskState: 'working',
-        currentTaskContextId: this.streaming.contextId || null,
-        currentTaskUpdatedAt: Date.now()
+      // Serialize identity writes on the same per-conversation chain as context
+      // promotion so finalize/reconcile can deterministically wait for them.
+      const streamingSnapshot = { ...this.streaming };
+      this._runSerialized(convId, async () => {
+        await Storage.setActiveTask(convId, streamingSnapshot);
+        // Persist task identity on the durable conversation as soon as the
+        // server assigns it. This allows GetTask recovery even if activeTasks
+        // is later lost.
+        await Storage.updateTaskSnapshot(convId, {
+          currentTaskId: reportedTaskId,
+          currentTaskState: 'working',
+          currentTaskContextId: streamingSnapshot.contextId || null,
+          currentTaskUpdatedAt: Date.now()
+        });
       });
     }
     const taskId = reportedTaskId || expectedTaskId;
@@ -127,12 +144,68 @@ export class ConversationManager {
   }
 
   _handleTaskSnapshot(convId, taskId, task, onEvent) {
-    if (task.id && this.streaming) { this.streaming.taskId = task.id; Storage.setActiveTask(convId, { ...this.streaming }); }
-    if (task.contextId && this.streaming) this.streaming.contextId = task.contextId;
+    if (task.id && this.streaming) {
+      // Adopt the server-returned contextId before persisting the active task
+      // so the stored task record never carries a stale locally generated ID.
+      if (task.contextId) this._persistCanonicalContextId(convId, task.contextId, true);
+      this.streaming.taskId = task.id;
+      // Serialize the active-task write on the per-conversation chain so
+      // finalize/reconcile can deterministically wait for it.
+      const streamingSnapshot = { ...this.streaming };
+      this._runSerialized(convId, async () => {
+        await Storage.setActiveTask(convId, streamingSnapshot);
+      });
+    } else if (task.contextId && this.streaming) {
+      this._persistCanonicalContextId(convId, task.contextId, true);
+    }
     if (task.artifacts) { for (const a of task.artifacts) this._accumArtifact(convId, taskId, a, false, onEvent); }
     if (task.status) {
       this._applyStatus(convId, taskId, task.status, onEvent, false);
     }
+  }
+
+  // Storage helpers are asynchronous read-modify-write operations. Serialize
+  // context/identity persistence per conversation so concurrent writes cannot
+  // interleave and a stale read-modify-write cannot clobber a newer one.
+  // The returned promise always resolves; failures are caught and logged so
+  // callers can await it without unhandled rejections.
+  _runSerialized(convId, work) {
+    const previous = this._contextPersist[convId] || Promise.resolve();
+    const pending = previous.catch(() => {}).then(work);
+    const settled = pending.then(
+      () => undefined,
+      error => console.error('Serialized persistence for conversation failed:', error)
+    );
+    this._contextPersist[convId] = settled;
+    return settled;
+  }
+
+  // A server-returned task contextId is canonical for this local conversation.
+  // Mirror it into this.streaming synchronously — before any storage write, so
+  // every subsequent write carries the canonical value — then durably persist
+  // it to the conversation (a2aContextId, plus currentTaskContextId while a
+  // task is active) and to the active-task record. Returns a promise that
+  // resolves once the persistence is durable; errors are caught and logged.
+  _persistCanonicalContextId(convId, contextId, isActive = false) {
+    if (!contextId) return Promise.resolve();
+    if (this.streaming && this.streaming.convId === convId && this.streaming.contextId !== contextId) {
+      this.streaming.contextId = contextId;
+    }
+    return this._runSerialized(convId, async () => {
+      const activeTask = await Storage.getActiveTask(convId);
+      if (activeTask && activeTask.contextId !== contextId) {
+        activeTask.contextId = contextId;
+        await Storage.setActiveTask(convId, activeTask);
+      }
+      const conv = await Storage.getConversationById(convId);
+      if (!conv) return;
+      const updates = { a2aContextId: contextId };
+      const taskActive = isActive || Boolean(this.streaming && this.streaming.convId === convId);
+      if (taskActive || (conv.currentTaskId && conv.currentTaskState !== 'idle')) {
+        updates.currentTaskContextId = contextId;
+      }
+      await Storage.updateTaskSnapshot(convId, updates);
+    });
   }
 
   async _persistBufferedAssistantTurn(convId, taskId) {
@@ -147,7 +220,7 @@ export class ConversationManager {
       record.text ? [{ kind: 'text', text: record.text }] : [],
       {
         taskId,
-        contextId: conv.a2aContextId,
+        contextId: this.streaming?.contextId || conv.a2aContextId,
         artifactId: record.artifactId,
         segmentId: record.segmentId,
         segmentType: record.segmentType,
@@ -406,7 +479,7 @@ export class ConversationManager {
       const parts = record.text ? [{ kind: 'text', text: record.text }] : [];
       return Storage.makeMessage('assistant', parts, {
         taskId,
-        contextId: conv.a2aContextId,
+        contextId: this.streaming?.contextId || conv.a2aContextId,
         artifactId: record.artifactId,
         segmentId: record.segmentId,
         segmentType: record.segmentType,
@@ -415,6 +488,11 @@ export class ConversationManager {
       });
     });
     await Storage.appendAssistantMessagesForTask(convId, taskId, messages.filter(message => message.parts.length || message.toolUses?.length || message.question));
+    // Wait for any in-flight canonical context/identity persistence before
+    // clearing task bookkeeping. Otherwise a promotion write landing after the
+    // clear could resurrect activeTasks with a stale record, and clearing
+    // currentTaskContextId first could race the canonical write.
+    if (this._contextPersist[convId]) await this._contextPersist[convId];
     await Storage.updateTaskSnapshot(convId, { currentTaskId: null, currentTaskState: 'idle', currentTaskContextId: null, currentTaskCompletedAt: Date.now() });
     await Storage.clearActiveTask(convId);
     delete this._buffers[convId]?.[taskId];
@@ -446,6 +524,11 @@ export class ConversationManager {
     }
     const snapshot = this.client.materializeTaskSnapshot(serverTask);
     if (!snapshot) return { state: 'not_found' };
+
+    // A server-returned contextId is canonical for this local conversation.
+    // Promote it durably (and await completion) so the next task in this
+    // conversation reuses it immediately after reconcile returns.
+    if (snapshot.contextId) await this._persistCanonicalContextId(convId, snapshot.contextId, true);
 
     const snapshotMessages = snapshot.chunks.map(chunk => Storage.makeMessage('assistant',
       chunk.text ? [{ kind: 'text', text: chunk.text }] : [],

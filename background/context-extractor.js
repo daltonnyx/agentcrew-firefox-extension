@@ -29,7 +29,7 @@ export class ContextExtractor {
           const article = document.querySelector('article') || document.body;
           const clone = article.cloneNode(true);
           clone.querySelectorAll('script,style,nav,footer,header,aside').forEach(el => el.remove());
-          return clone.innerText.slice(0, 15000);
+          return clone.innerText;
         }
       });
       return { ok: true, text: results[0]?.result || '' };

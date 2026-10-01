@@ -110,7 +110,7 @@ async function _migrateIfNeeded(state) {
         newConvs[convId] = {
           id: convId,
           agentName,
-          contextId: old.contextId || `ctx_${uuid()}`,
+          a2aContextId: old.a2aContextId || old.contextId || `ctx_${uuid()}`,
           currentTaskId: old.currentTaskId || null,
           messages: old.messages || [],
           phase: old.phase || 'idle',
@@ -125,6 +125,25 @@ async function _migrateIfNeeded(state) {
       state.conversationOrder = order;
       state.activeConversationId = order[0] || null;
       state.lastSelectedAgent = state.serverConfig?.defaultAgent || keys[0] || null;
+      dirty = true;
+    }
+  }
+
+  // Migration 3: every conversation must carry a2aContextId. Repairs records
+  // that only have the legacy contextId field, and UUID-keyed states that were
+  // never migrated (they lack a2aContextId entirely). Prefer an existing
+  // a2aContextId, then legacy contextId, otherwise generate ctx_<uuid>; drop
+  // the legacy contextId field while preserving all other conversation data.
+  const convs = state.conversations || {};
+  for (const convId of Object.keys(convs)) {
+    const conv = convs[convId];
+    if (!conv || typeof conv !== 'object') continue;
+    if (!conv.a2aContextId) {
+      conv.a2aContextId = conv.contextId || `ctx_${uuid()}`;
+      dirty = true;
+    }
+    if (conv.contextId !== undefined) {
+      delete conv.contextId;
       dirty = true;
     }
   }
